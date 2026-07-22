@@ -1,0 +1,4 @@
+pydantic>=2.0,<3.0
+PyYAML>=6.0,<7.0
+requests>=2.31,<3.0
+textual>=7.0,<8.0

@@ -1,0 +1,26 @@
+# Generated pool / DB (rebuildable from CSV + sources)
+pool.db
+*.db
+
+# Secrets — never commit API keys
+.env
+
+# Local buyer data and preferences
+preferences.yaml
+SI_*.docx
+archive/*.csv
+
+# macOS
+.DS_Store
+
+# Update-cycle artifacts
+.last_run.json
+backups/
+logs/
+pool_export.csv
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/

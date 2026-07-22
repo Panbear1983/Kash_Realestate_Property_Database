@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Reference template for the daily Kash update job.
+  Do NOT edit/install this copy by hand — run  bash scripts/install_scheduler.sh
+  which generates the live plist in ~/Library/LaunchAgents/ with your machine's real
+  python3/codex PATH filled in. This file documents what that job looks like.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.kash.update</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>python3</string>
+    <string>run_update.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/path/to/Kash_Realestate_Property</string>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer></dict>
+  <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>logs/update.log</string>
+  <key>StandardErrorPath</key><string>logs/update.log</string>
+</dict>
+</plist>
