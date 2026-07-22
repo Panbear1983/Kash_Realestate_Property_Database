@@ -137,6 +137,19 @@ The language model never receives the database and never writes SQL. It returns 
 structured filter specification; Kash validates the requested fields and operators,
 then executes a parameterized query locally.
 
+### Telegram access editor
+
+Press `F2` in the dashboard to manage bot access. Highlight an existing user and press
+`e`, or press `n` to add a Telegram ID. The form accepts:
+
+```text
+123456789 name="Jane Doe" status=allowed access=read message="Original request text"
+```
+
+`message=` and `first_message=` are aliases. Use `message=""` to clear the stored first
+message. This is an editable audit/display field for the user's first incoming message;
+it does not configure a personalized bot greeting.
+
 ## Data and privacy
 
 The following stay local and are excluded from Git:

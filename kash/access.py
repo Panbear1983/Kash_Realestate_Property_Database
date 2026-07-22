@@ -60,20 +60,25 @@ class Access:
         self.conn.commit()
         return "pending"
 
-    def add(self, user_id, name=None, status="allowed") -> None:
+    def add(self, user_id, name=None, status="allowed", first_message=None) -> None:
         """Pre-authorize (or update) a user by Telegram ID — no prior message needed."""
         self.conn.execute(
-            """INSERT INTO access (telegram_user_id, name, status, access_level, updated_at)
-               VALUES (?, ?, ?, 'read', ?)
+            """INSERT INTO access
+                   (telegram_user_id, name, status, access_level, first_message, updated_at)
+               VALUES (?, ?, ?, 'read', ?, ?)
                ON CONFLICT(telegram_user_id) DO UPDATE SET
                    status=excluded.status,
                    name=COALESCE(excluded.name, access.name),
+                   first_message=COALESCE(excluded.first_message, access.first_message),
                    updated_at=excluded.updated_at""",
-            (int(user_id), name, status, date.today().isoformat()),
+            (int(user_id), name, status,
+             None if first_message is None else str(first_message)[:200],
+             date.today().isoformat()),
         )
         self.conn.commit()
 
-    def edit(self, user_id, name=None, status=None, access_level=None) -> None:
+    def edit(self, user_id, name=None, status=None, access_level=None,
+             first_message=None) -> None:
         """Update any subset of an existing entry's editable fields."""
         sets, vals = [], []
         if name is not None:
@@ -82,6 +87,8 @@ class Access:
             sets.append("status=?"); vals.append(status)
         if access_level is not None:
             sets.append("access_level=?"); vals.append(access_level)
+        if first_message is not None:
+            sets.append("first_message=?"); vals.append(str(first_message)[:200])
         if not sets:
             return
         sets.append("updated_at=?"); vals.append(date.today().isoformat())

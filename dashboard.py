@@ -65,6 +65,42 @@ def _cell(v):
     return str(v)
 
 
+def _parse_access_input(raw: str) -> dict:
+    """Parse one access-editor line into fields understood by ``Access``."""
+    try:
+        tokens = shlex.split(raw)
+    except ValueError:
+        tokens = raw.split()
+    if not tokens or not tokens[0].lstrip("-").isdigit():
+        raise ValueError("Enter a numeric Telegram ID")
+
+    parsed = {
+        "user_id": int(tokens[0]),
+        "name": None,
+        "status": None,
+        "access_level": None,
+        "first_message": None,
+    }
+    bare = []
+    for token in tokens[1:]:
+        if "=" not in token:
+            bare.append(token)
+            continue
+        key, value = token.split("=", 1)
+        key = key.lower()
+        if key == "name":
+            parsed["name"] = value
+        elif key == "status":
+            parsed["status"] = value.lower()
+        elif key in ("access", "access_level"):
+            parsed["access_level"] = value.lower()
+        elif key in ("message", "first_message"):
+            parsed["first_message"] = value
+    if bare and parsed["name"] is None:
+        parsed["name"] = " ".join(bare)
+    return parsed
+
+
 class AccessScreen(ModalScreen):
     """Manage who may chat with @Kash_Realestate_Property_bot (read-only access)."""
     CSS = """
@@ -96,7 +132,7 @@ class AccessScreen(ModalScreen):
             yield Static("Telegram bot access — @Kash_Realestate_Property_bot (read-only)", id="atitle")
             yield Static("n add ID  ·  e edit  ·  a approve  ·  d deny  ·  x remove  ·  r refresh  ·  esc close")
             yield DataTable(id="acl", cursor_type="row", zebra_stripes=True)
-            yield Input(placeholder="Add/edit: 123456789 name=Jane status=allowed  (bare text = name)  — Enter", id="addbox")
+            yield Input(placeholder='Add/edit: 123456789 name="Jane" status=allowed message="Hello" — Enter', id="addbox")
             yield Static("", id="astatus")
 
     def on_mount(self):
@@ -151,9 +187,16 @@ class AccessScreen(ModalScreen):
             return
         r = self._rows[i]
         name = r.get("name") or ""
-        namepart = f' name="{name}"' if name and name != "-" else ""
+        parts = [str(r["telegram_user_id"])]
+        if name and name != "-":
+            parts.append(f"name={shlex.quote(name)}")
+        parts.extend([
+            f"status={r['status']}",
+            f"access={r.get('access_level') or 'read'}",
+            f"message={shlex.quote(r.get('first_message') or '')}",
+        ])
         box = self.query_one("#addbox", Input)
-        box.value = f'{r["telegram_user_id"]}{namepart} status={r["status"]} access={r.get("access_level") or "read"}'
+        box.value = " ".join(parts)
         box.focus()
         self.query_one("#astatus", Static).update(
             f"[b]editing {r['telegram_user_id']}[/] — change fields, Enter to save")
@@ -166,29 +209,15 @@ class AccessScreen(ModalScreen):
         event.input.value = ""
         status_line = self.query_one("#astatus", Static)
         try:
-            tokens = shlex.split(raw)
-        except ValueError:
-            tokens = raw.split()
-        if not tokens or not tokens[0].lstrip("-").isdigit():
-            status_line.update("[b red]Enter a numeric Telegram ID[/]")
+            parsed = _parse_access_input(raw)
+        except ValueError as exc:
+            status_line.update(f"[b red]{exc}[/]")
             return
-        uid = int(tokens[0])
-        name = status = access = None
-        bare = []
-        for t in tokens[1:]:
-            if "=" in t:
-                k, v = t.split("=", 1)
-                k = k.lower()
-                if k == "name":
-                    name = v
-                elif k == "status":
-                    status = v.lower()
-                elif k in ("access", "access_level"):
-                    access = v.lower()
-            else:
-                bare.append(t)
-        if bare and name is None:
-            name = " ".join(bare)
+        uid = parsed["user_id"]
+        name = parsed["name"]
+        status = parsed["status"]
+        access = parsed["access_level"]
+        first_message = parsed["first_message"]
         if status and status not in self.STATUSES:
             status_line.update(f"[b red]status must be {' / '.join(sorted(self.STATUSES))}[/]")
             return
@@ -197,10 +226,12 @@ class AccessScreen(ModalScreen):
             return
         exists = any(r["telegram_user_id"] == uid for r in self._rows)
         if exists:
-            self.access.edit(uid, name=name, status=status, access_level=access)
+            self.access.edit(uid, name=name, status=status, access_level=access,
+                             first_message=first_message)
             verb = "Updated"
         else:
-            self.access.add(uid, name, status=status or "allowed")
+            self.access.add(uid, name, status=status or "allowed",
+                            first_message=first_message)
             verb = "Added"
         self.reload_list()
         status_line.update(f"[b green]{verb} {uid}[/]")
