@@ -52,16 +52,26 @@ def _prompt(question: str) -> str:
     )
 
 
-def route(config=None, override=None, job="chat"):
+def route(config=None, override=None, job="chat", actor=None, store=None):
     """Build the backend ladder for one request.
 
     `config` is the whole preferences dict (we pull the `llm:` block out of it); `override` pins
     a single backend by name, e.g. from a per-user `model` command. Defaults to the `chat` job,
-    whose ladder is ordered for latency because a user is waiting on the reply. Read `.chosen`
-    off the returned object after a call to find out which rung actually answered.
+    whose ladder is ordered for latency because a user is waiting on the reply. Passing `actor`
+    and `store` lets the ladder demote rungs that actor has exhausted today. Read `.chosen` off
+    the returned object after a call to find out which rung actually answered.
     """
     from . import llm
-    return llm.route((config or {}).get("llm"), override, job)
+    return llm.route((config or {}).get("llm"), override, job, actor=actor, store=store)
+
+
+def record_usage(store, backend, actor, job="chat"):
+    """Log one completed call. Safe to call with a partly-failed backend."""
+    if store is None or actor is None or getattr(backend, "chosen", None) is None:
+        return
+    from .usage import Usage
+    Usage(store).record(actor, backend.chosen, job=job,
+                        usage=getattr(backend, "last_usage", None))
 
 
 def get_backend(config=None):

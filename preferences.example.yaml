@@ -53,6 +53,16 @@ llm:
     # - anthropic          # Claude API; needs ANTHROPIC_API_KEY, billed per token
   timeout: 120
   available_ttl: 60        # seconds between availability probes per backend
+  # Per-rung daily request caps. Each rung is a separate subscription, so a user who exhausts
+  # one rolls onto the next provider's quota instead of draining a single one. Counted in
+  # requests rather than tokens because codex and agy_cli report no token counts, and codex
+  # answers most chat questions — a token budget would leave the busiest path unmetered.
+  budgets:
+    default:
+      requests_per_day: 40
+    system:                # batch jobs (rank, describe) get their own allowance
+      requests_per_day: 200
+    per_actor: {}          # '<telegram_user_id>': {requests_per_day: 200}
   backends:
     codex:
       bin: codex

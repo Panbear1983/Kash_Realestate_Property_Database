@@ -413,9 +413,10 @@ class KashDashboard(App):
     def chat_worker(self, message: str):
         rung = None
         try:
-            backend = nl.route(self.prefs)
+            backend = nl.route(self.prefs, actor="owner", store=self.store)
             reply, rows = nl.converse(message, self.store, backend=backend)
             rung = backend.chosen
+            nl.record_usage(self.store, backend, "owner")
         except Exception as e:  # noqa: BLE001
             reply, rows = (f"error: {e}", [])
         self.call_from_thread(self.chat_result, reply, rows, rung)

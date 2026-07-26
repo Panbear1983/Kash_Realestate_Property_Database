@@ -77,6 +77,15 @@ def derive_from_csv(csv_path: str) -> dict:
             "ladder": ["codex", "claude_cli"],
             "timeout": 120,
             "available_ttl": 60,
+            # Per-rung daily request budgets. Each rung is a separate subscription, so a user
+            # who exhausts one rolls onto the next provider's quota rather than draining one.
+            # Requests, not tokens: codex and agy_cli report no token counts, and codex answers
+            # most chat questions, so tokens would leave the dominant path unmetered.
+            "budgets": {
+                "default": {"requests_per_day": 40},
+                "system": {"requests_per_day": 200},
+                "per_actor": {},
+            },
             "backends": {
                 "codex": {"bin": "codex", "model": None, "timeout": 120},
                 "claude_cli": {"bin": "claude", "model": "haiku", "timeout": 120},

@@ -73,7 +73,9 @@ def extract_descriptions(store, prefs: dict, limit: int = 15, backend=None) -> d
     if not rows:
         return {"extracted": 0, "candidates": 0}
 
-    backend = backend or llm.route((prefs or {}).get("llm"), job="extract")
+    from ..usage import SYSTEM, Usage
+    backend = backend or llm.route((prefs or {}).get("llm"), job="extract",
+                                   actor=SYSTEM, store=store)
     ok, why = backend.available()
     if not ok:
         return {"extracted": 0, "candidates": len(rows), "skipped": why}
@@ -91,6 +93,12 @@ def extract_descriptions(store, prefs: dict, limit: int = 15, backend=None) -> d
         except Exception:  # noqa: BLE001 — one bad row must not end the batch
             failed += 1
             continue
+        try:
+            if getattr(backend, "chosen", None):
+                Usage(store).record(SYSTEM, backend.chosen, job="extract",
+                                    usage=getattr(backend, "last_usage", None))
+        except Exception:  # noqa: BLE001 — metering must not fail the batch
+            pass
         friction = spec.get("friction") or []
         if isinstance(friction, str):          # tolerate a comma string from a loose backend
             friction = [f.strip() for f in friction.split(",") if f.strip()]

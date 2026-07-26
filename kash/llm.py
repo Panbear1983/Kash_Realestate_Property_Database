@@ -489,13 +489,32 @@ class LadderBackend:
 
 
 def route(config: Optional[dict] = None, override: Optional[str] = None,
-          job: Optional[str] = None) -> LadderBackend:
+          job: Optional[str] = None, actor=None, store=None) -> LadderBackend:
     """Build the backend for a request.
 
     `config` is the `llm:` block from preferences.yaml. `job` selects a named ladder
     (`chat` / `extract` / `rank`); `override` pins one rung and wins over everything.
+
+    When `actor` and `store` are given, rungs this actor has already exhausted today are moved
+    to the back of the ladder rather than removed. Every rung is a separate subscription, so a
+    heavy user rolls onto a different provider's quota instead of draining one — and because
+    exhausted rungs are demoted rather than dropped, running out everywhere degrades to the
+    original order instead of refusing to answer.
+
+    An explicit override still wins: pinning is an instruction, not a suggestion.
     """
-    return LadderBackend(config, resolve_ladder(config, override, job))
+    names = resolve_ladder(config, override, job)
+    if actor is not None and store is not None and not override and len(names) > 1:
+        try:
+            from .usage import Usage, within_budget
+            usage = Usage(store)
+            fresh = [n for n in names if within_budget(config, usage, actor, n)]
+            spent = [n for n in names if n not in fresh]
+            if fresh:
+                names = fresh + spent
+        except Exception:  # noqa: BLE001 — never let accounting break routing
+            pass
+    return LadderBackend(config, names)
 
 
 def get_backend(config: Optional[dict] = None):

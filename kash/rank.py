@@ -74,6 +74,17 @@ def _prompt(listing: dict, prefs: dict, exemplars: list[dict]) -> str:
     )
 
 
+def _record(store, backend):
+    """Bill one batch call to the system actor. Never raises."""
+    try:
+        from .usage import SYSTEM, Usage
+        if getattr(backend, "chosen", None):
+            Usage(store).record(SYSTEM, backend.chosen, job="rank",
+                                usage=getattr(backend, "last_usage", None))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def apply_property_priority(updates: dict, listing: dict) -> dict:
     """Apply non-negotiable buyer preferences after model ranking."""
     updates = dict(updates)
@@ -85,8 +96,10 @@ def apply_property_priority(updates: dict, listing: dict) -> dict:
 
 
 def rank_new(store, prefs: dict, limit: Optional[int] = 15, backend=None) -> dict:
-    # 'rank' ladder: a nightly judgment call, so depth beats latency here.
-    backend = backend or route(prefs.get("llm"), job="rank")
+    # 'rank' ladder: a nightly judgment call, so depth beats latency here. Batch work bills to
+    # the 'system' actor so it can't eat a person's daily allowance.
+    from .usage import SYSTEM
+    backend = backend or route(prefs.get("llm"), job="rank", actor=SYSTEM, store=store)
     ok, why = backend.available()
     if not ok:
         return {"ranked": 0, "skipped": why}
@@ -107,6 +120,7 @@ def rank_new(store, prefs: dict, limit: Optional[int] = 15, backend=None) -> dic
             spec = backend.query_spec(_prompt(r, prefs, exemplars), RANK_SCHEMA)
         except Exception:  # noqa: BLE001 — one bad rank shouldn't stop the batch
             continue
+        _record(store, backend)
         updates = {
             "tier": spec.get("tier"),
             "view_priority": spec.get("view_priority"),
