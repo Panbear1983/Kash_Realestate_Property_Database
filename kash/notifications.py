@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 
 from .dedup import match_key
 from .eligibility import alert_ready
-from .signals import score_description
+from .signals import multigenerational, score_description
 
 
 def _is_clickable_url(value) -> bool:
@@ -31,8 +31,17 @@ def actionable_listings(rows: list[dict], prefs: dict) -> list[dict]:
 
 
 def listing_delivery_kind(row: dict) -> str | None:
+    """Delivery receipt key for one listing.
+
+    Includes the price, so a re-priced home counts as a new thing to tell you about. With a
+    constant `listing:{key}` a price drop on a home you had already been shown produced no
+    notification at all — the single most actionable event for someone tracking a shortlist.
+    """
     key = match_key(row)
-    return f"listing:{key}" if key else None
+    if not key:
+        return None
+    price = row.get("list_price")
+    return f"listing:{key}:{price}" if price is not None else f"listing:{key}"
 
 
 def unsent_actionable_listings(store, recipient_id: int, prefs: dict) -> list[dict]:
@@ -65,11 +74,20 @@ def format_listing_brief(row: dict) -> str:
     if row.get("baths") is not None:
         facts.append(f"{row['baths']} ba")
     details = " · ".join(facts) or "home details pending"
+    # Use the same union rank.py uses, not the raw substring matcher. The keyword path missed
+    # every paraphrased mother/daughter setup, so a home the ranker had flagged TOP PRIORITY
+    # arrived in Telegram saying "no extra feature claims" — which is the entire reason the
+    # description extractor exists.
+    is_multigen, why = multigenerational(row)
     signals = score_description(row.get("listing_description"))
     highlights = []
-    if "separate entrance" in signals.reasons:
-        highlights.append("separate entrance — golden-ticket setup")
-    if "second kitchen" in signals.reasons:
+    if is_multigen:
+        if row.get("signal_separate_entrance") or "separate entrance" in signals.reasons:
+            highlights.append("separate entrance — golden-ticket setup")
+        else:
+            highlights.append(f"multigenerational setup — {why}" if why
+                              else "multigenerational setup")
+    if row.get("signal_second_kitchen") or "second kitchen" in signals.reasons:
         highlights.append("second kitchen in the listing notes")
     if "in-law suite" in signals.reasons:
         highlights.append("in-law suite noted")
@@ -84,9 +102,45 @@ def format_listing_brief(row: dict) -> str:
 
 
 def format_testing_digest(rows: list[dict]) -> str:
+    """Single-message rendering. Prefer chunk_digest() for anything that actually gets sent."""
     if not rows:
         return "Robo Kash testing update: no new actionable listings today."
-    lines = ["Robo Kash testing: actionable listings"]
-    for row in rows[:20]:
-        lines.append(format_listing_brief(row))
-    return "\n".join(lines)
+    return "\n".join(["Robo Kash testing: actionable listings"] +
+                     [format_listing_brief(r) for r in rows])
+
+
+# Telegram rejects anything over 4096 characters. Leave headroom for the header and for the
+# onboarding/digest text that may be prepended to the first message.
+TELEGRAM_LIMIT = 3900
+
+
+def chunk_digest(rows: list[dict], limit: int = TELEGRAM_LIMIT) -> list[tuple[str, list[dict]]]:
+    """Split listings into messages that fit, returning each message with the rows inside it.
+
+    Returning the rows alongside the text is the point: the caller can then mark delivered
+    only the listings in a chunk that actually sent. Previously every actionable listing was
+    marked delivered whenever the single send returned 'sent', while `rows[:20]` had already
+    dropped the rest and `text[:4000]` truncated what remained — so with 28 actionable rows,
+    8 were never rendered, more were cut mid-message, and all 28 were recorded as delivered
+    and could never be shown again.
+    """
+    if not rows:
+        return []
+    header = "Robo Kash testing: actionable listings"
+    chunks: list[tuple[str, list[dict]]] = []
+    cur_lines, cur_rows = [header], []
+    cur_len = len(header)
+    for row in rows:
+        brief = format_listing_brief(row)
+        if cur_rows and cur_len + len(brief) + 1 > limit:
+            chunks.append(("\n".join(cur_lines), cur_rows))
+            cur_lines, cur_rows, cur_len = [header], [], len(header)
+        cur_lines.append(brief)
+        cur_rows.append(row)
+        cur_len += len(brief) + 1
+    if cur_rows:
+        chunks.append(("\n".join(cur_lines), cur_rows))
+    if len(chunks) > 1:
+        chunks = [(f"{t}\n\n({i + 1}/{len(chunks)})", r)
+                  for i, (t, r) in enumerate(chunks)]
+    return chunks

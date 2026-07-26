@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from kash.access import Access  # noqa: E402
 from kash.notifications import (  # noqa: E402
     actionable_listings, format_listing_brief, format_onboarding, format_testing_digest,
-    testing_recipients, unsent_actionable_listings,
+    listing_delivery_kind, testing_recipients, unsent_actionable_listings,
 )
 from kash.store import Store  # noqa: E402
 from run_update import push_telegram  # noqa: E402
@@ -57,8 +57,11 @@ def test_delayed_flood_enrichment_can_alert_once_when_listing_becomes_safe():
     key = store.conn.execute("SELECT match_key FROM listings").fetchone()[0]
     assert unsent_actionable_listings(store, 101, PREFS) == []
     store.update_fields(key, {"flood_zone": "X"})
-    assert [row["street_address"] for row in unsent_actionable_listings(store, 101, PREFS)] == ["12 Example Street"]
-    store.mark_notification_sent(101, f"listing:{key}")
+    pending = unsent_actionable_listings(store, 101, PREFS)
+    assert [row["street_address"] for row in pending] == ["12 Example Street"]
+    # Ask the module for the key rather than rebuilding it here — the format now includes the
+    # price so a re-priced home re-alerts, and a hand-built key silently stops matching.
+    store.mark_notification_sent(101, listing_delivery_kind(pending[0]))
     assert unsent_actionable_listings(store, 101, PREFS) == []
     store.close()
 

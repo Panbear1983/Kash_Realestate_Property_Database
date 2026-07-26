@@ -19,7 +19,7 @@ from kash.adapters import REGISTRY
 from kash import orchestrator, preferences, schedule
 from kash.access import Access
 from kash.notifications import (
-    format_onboarding, format_testing_digest, listing_delivery_kind, testing_recipients,
+    chunk_digest, format_onboarding, listing_delivery_kind, testing_recipients,
     unsent_actionable_listings,
 )
 from kash.store import Store
@@ -62,8 +62,11 @@ def push_telegram(text, chat_ids: list[int], request_get=None) -> dict[int, str]
     outcomes = {}
     for chat_id in chat_ids:
         try:
+            # No silent truncation: chunking is the caller's job (notifications.chunk_digest),
+            # and quietly cutting a message here meant listings were recorded as delivered
+            # having never been shown.
             r = request_get(f"https://api.telegram.org/bot{tok}/sendMessage",
-                            params={"chat_id": int(chat_id), "text": text[:4000]}, timeout=20)
+                            params={"chat_id": int(chat_id), "text": text}, timeout=20)
             outcomes[int(chat_id)] = "sent" if r.json().get("ok") else r.json().get("description", "fail")
         except Exception as e:  # noqa: BLE001
             outcomes[int(chat_id)] = f"error: {e}"
@@ -153,20 +156,31 @@ def main():
             actionable = unsent_actionable_listings(store, recipient_id, prefs)
             if not actionable:
                 continue
-            parts = []
             onboarding_due = not store.notification_sent(recipient_id, "onboarding")
-            if onboarding_due:
-                parts.append(format_onboarding())
-            parts.append(format_testing_digest(actionable))
-            outcome = push_telegram("\n\n".join(parts), [recipient_id])[recipient_id]
-            outcomes[recipient_id] = outcome
-            if outcome == "sent":
-                if onboarding_due:
+            chunks = chunk_digest(actionable)
+            # The change digest (price drops, went pending, back on market) names exactly the
+            # events worth knowing about and was previously only ever printed to a log.
+            preamble = [p for p in (format_onboarding() if onboarding_due else None,
+                                    result["digest"] if any(result["groups"].values()) else None)
+                        if p]
+            sent_any, failures = 0, []
+            for i, (text, rows_in_chunk) in enumerate(chunks):
+                body = "\n\n".join(preamble + [text]) if i == 0 and preamble else text
+                outcome = push_telegram(body, [recipient_id])[recipient_id]
+                if outcome != "sent":
+                    # Mark nothing for a chunk that did not arrive, so it is retried next run.
+                    failures.append(outcome)
+                    continue
+                sent_any += 1
+                if i == 0 and onboarding_due:
                     store.mark_notification_sent(recipient_id, "onboarding")
-                for listing in actionable:
+                for listing in rows_in_chunk:
                     kind = listing_delivery_kind(listing)
                     if kind:
                         store.mark_notification_sent(recipient_id, kind)
+            outcomes[recipient_id] = (
+                f"sent {sent_any}/{len(chunks)}" if not failures
+                else f"sent {sent_any}/{len(chunks)}, failed: {'; '.join(failures[:2])}")
         if outcomes:
             print(f"\n[telegram] {outcomes}")
         elif recipients:
