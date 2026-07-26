@@ -76,8 +76,11 @@ def test_snapshot_preserves_user_protected_values():
     """The 35 curated rows are the only irreplaceable data; this is what backups exist for."""
     from kash.dedup import match_key
     s, path = make(n=1)
+    # allow_protected: these are exactly the fields update_fields now refuses by default,
+    # and exactly the fields backups exist to protect.
     s.update_fields(match_key(s.all()[0]),
-                    {"my_notes": "private note", "analysis": "curated", "tier": "S"})
+                    {"my_notes": "private note", "analysis": "curated", "tier": "S"},
+                    allow_protected=True)
     dest = backup.snapshot(path)
     c = sqlite3.connect(dest)
     c.row_factory = sqlite3.Row

@@ -131,6 +131,9 @@ def rank_new(store, prefs: dict, limit: Optional[int] = 15, backend=None) -> dic
             "analysis": "[auto] " + (spec.get("analysis") or ""),
         }
         updates = apply_property_priority(updates, r)
-        store.update_fields(key, {k: v for k, v in updates.items() if v is not None})
+        # tier and analysis are USER_PROTECTED; ranking is the one writer allowed to set them,
+        # and only on rows that have none yet (rank_new filters on tier IS NULL).
+        store.update_fields(key, {k: v for k, v in updates.items() if v is not None},
+                            allow_protected=True)
         ranked += 1
     return {"ranked": ranked, "candidates": len(new)}

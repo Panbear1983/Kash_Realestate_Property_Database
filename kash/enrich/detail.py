@@ -90,8 +90,17 @@ def _price_history(ph):
 
 
 def _original_list(ph):
+    """The asking price at the start of the CURRENT listing cycle.
+
+    priceHistory is newest-first, so this takes listings[0]. It previously took listings[-1],
+    the oldest 'Listed for sale' event in the whole history — which for a home sold once before
+    is a previous owner's price from years ago. 203 Chandler Ave stored $525,000 from a 2011
+    listing against a $915,000 asking price, and that value is exported to CSV and rendered in
+    the dashboard looking like clean data. It also feeds price_drop_pct, so a decade of market
+    appreciation was being reported as a price cut.
+    """
     listings = [e for e in (ph or []) if (e.get("event") or "").lower().startswith("listed")]
-    return listings[-1].get("price") if listings else None   # ph is newest-first
+    return listings[0].get("price") if listings else None
 
 
 def _normalize(it: dict) -> dict:

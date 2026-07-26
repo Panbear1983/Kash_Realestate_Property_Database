@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from .schema import CALC_FIELDS
+
 DEFAULTS = {
     "rate": 0.063,            # 30-yr fixed, from the doc
     "term_years": 30,
@@ -85,3 +87,11 @@ def recompute(rec: dict, cfg: Optional[dict] = None) -> dict:
     rec["cap_rate"] = cap_rate(rec, cfg)
     rec["cash_on_cash"] = cash_on_cash(rec, cfg)
     return rec
+
+
+# Guard against a calc field being added to the schema and silently never computed. Kept here
+# rather than as a test-only assertion so it fails loudly at import, wherever it is used.
+_MISSING = set(CALC_FIELDS) - {"price_per_sqft", "price_drop_pct", "monthly_piti",
+                               "cap_rate", "cash_on_cash"}
+if _MISSING:  # pragma: no cover - configuration error, not a runtime branch
+    raise RuntimeError(f"finance.recompute does not compute CALC_FIELDS: {sorted(_MISSING)}")

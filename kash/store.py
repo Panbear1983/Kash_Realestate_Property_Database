@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import date
 from typing import Optional
@@ -16,8 +17,11 @@ from typing import Optional
 from . import finance
 from .dedup import match_key, site_from_url
 from .schema import (
-    BOOL_FIELDS, FIELD_ORDER, JSON_FIELDS, USER_PROTECTED, Listing, sqlite_type,
+    BOOL_FIELDS, CALC_FIELDS, FIELD_ORDER, INT_FIELDS, JSON_FIELDS, REAL_FIELDS,
+    USER_PROTECTED, Listing, sqlite_type,
 )
+
+log = logging.getLogger("kash.store")
 
 
 def _to_db(field: str, value):
@@ -28,6 +32,48 @@ def _to_db(field: str, value):
     if field in BOOL_FIELDS:
         return 1 if value else 0
     return value
+
+
+_ENUMS = {
+    "status": {"active", "pending", "attorney_review", "off_market", "sold"},
+    "view_priority": {"now", "soon", "worth", "call", "watch", "skip"},
+    "property_type": {"sf_attached", "sf_semi", "sf_detached", "2fam_detached", "2fam_semi",
+                      "2fam_colonial", "condo", "apartment", "lot"},
+    "viewing_status": {"none", "scheduled", "seen", "skip"},
+    "offer_status": {"none", "considering", "offered", "rejected", "accepted"},
+}
+
+
+def _coerce_fields(fields: dict) -> dict:
+    """Coerce and validate values written through update_fields.
+
+    upsert() validates via the pydantic model; update_fields does not, so a model returning
+    tier "A+" or beds "3" as a string would previously land in the column verbatim. Bad enum
+    values are dropped with a log line rather than written — a silently invalid status would
+    make the row invisible to the alert gate.
+    """
+    out = {}
+    for k, v in fields.items():
+        if v is None:
+            out[k] = None
+            continue
+        if k in _ENUMS and str(v) not in _ENUMS[k]:
+            log.warning("update_fields: dropping invalid %s=%r", k, v)
+            continue
+        if k in INT_FIELDS and not isinstance(v, bool):
+            try:
+                out[k] = int(float(v))
+            except (TypeError, ValueError):
+                log.warning("update_fields: dropping non-numeric %s=%r", k, v)
+            continue
+        if k in REAL_FIELDS:
+            try:
+                out[k] = float(v)
+            except (TypeError, ValueError):
+                log.warning("update_fields: dropping non-numeric %s=%r", k, v)
+            continue
+        out[k] = v
+    return out
 
 
 def _from_db(field: str, value):
@@ -232,19 +278,52 @@ class Store:
         self.conn.commit()
         return "updated" if changed else "unchanged"
 
-    def update_fields(self, key: str, fields: dict) -> bool:
-        """Patch specific columns on one row (used by enrichment). Does not merge,
-        clobber `source`, or touch user-protected fields."""
+    def update_fields(self, key: str, fields: dict, allow_protected: bool = False) -> bool:
+        """Patch specific columns on one row (used by enrichment and ranking).
+
+        Two things this used to get wrong:
+
+        1. It issued a bare UPDATE, so the calculated columns went stale. Only `_write`
+           recomputed them, and nothing but `upsert` calls `_write` — so enriching a row with
+           its property tax or estimated rent left `monthly_piti` at whatever it was before.
+           Measured on the live pool: 34 of 67 rows carried a wrong PITI, the worst $545/month
+           out. That is the number a buyer uses to decide what they can afford.
+
+        2. Its docstring claimed it did not touch user-protected fields. It did — the filter
+           was `k in FIELD_ORDER` only. `allow_protected` makes the promise real and forces
+           the one legitimate caller (kash/rank.py, writing tier and analysis) to say so.
+
+        Note this path bypasses pydantic entirely, so values are coerced and enum columns
+        validated here rather than trusted.
+        """
         fields = {k: v for k, v in fields.items() if k in FIELD_ORDER}
+        if not allow_protected:
+            fields = {k: v for k, v in fields.items() if k not in USER_PROTECTED}
+        fields = {k: v for k, v in fields.items() if k not in CALC_FIELDS}  # derived, not set
+        fields = _coerce_fields(fields)
         if not fields:
             return False
         sets = ", ".join(f'"{k}"=?' for k in fields)
         vals = [_to_db(k, v) for k, v in fields.items()] + [key]
-        cur = self.conn.execute(
-            f"UPDATE listings SET {sets} WHERE match_key=?", vals
-        )
+        cur = self.conn.execute(f"UPDATE listings SET {sets} WHERE match_key=?", vals)
+        if cur.rowcount:
+            self._recompute_row(key)
         self.conn.commit()
         return cur.rowcount > 0
+
+    def _recompute_row(self, key: str) -> None:
+        """Refresh the derived columns from what the row now holds."""
+        row = self.conn.execute(
+            "SELECT * FROM listings WHERE match_key=?", (key,)).fetchone()
+        if row is None:
+            return
+        rec = {f: _from_db(f, row[f]) for f in FIELD_ORDER if f in row.keys()}
+        calc = finance.recompute(dict(rec), self.finance_cfg)
+        changed = {f: calc.get(f) for f in CALC_FIELDS if calc.get(f) != rec.get(f)}
+        if changed:
+            sets = ", ".join(f'"{k}"=?' for k in changed)
+            self.conn.execute(f"UPDATE listings SET {sets} WHERE match_key=?",
+                              [_to_db(k, v) for k, v in changed.items()] + [key])
 
     def seed_from_csv(self, csv_path: str) -> int:
         """Load the docx-derived CSV as the initial pool (idempotent by match_key)."""
