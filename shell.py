@@ -20,11 +20,12 @@ from collections import Counter
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from kash import nl, query           # noqa: E402
-from kash.store import Store          # noqa: E402
+from kash import nl, preferences, query   # noqa: E402
+from kash.store import Store              # noqa: E402
 
 DB = os.path.join(HERE, "pool.db")
 ENV = os.path.join(HERE, ".env")
+PREFS = os.path.join(HERE, "preferences.yaml")
 
 DISPLAY = [
     ("rank", "#", 4), ("tier", "T", 3), ("view_priority", "PRIO", 5),
@@ -104,8 +105,9 @@ def main():
         print("No pool.db yet — run:  python run_fetch.py --source mock")
         return
     store = Store(DB)
-    ok, why = nl.available()
-    nl_note = "codex/ChatGPT" if ok else f"off ({why})"
+    prefs = preferences.load(PREFS) if os.path.exists(PREFS) else {}
+    ok, why = nl.available(prefs)
+    nl_note = nl.route(prefs).name if ok else f"off ({why})"
     print(f"Kash shell — {store.count()} listings.  NL mode: {nl_note}.  Type 'help'.")
     while True:
         try:
@@ -137,8 +139,9 @@ def main():
                 print("  error:", e)
         elif cmd == "ask":
             try:
-                msg, rows = nl.answer(rest, store)
-                print("  " + msg)
+                backend = nl.route(prefs)
+                msg, rows = nl.answer(rest, store, backend=backend)
+                print(f"  {msg}" + (f"  [{backend.chosen}]" if backend.chosen else ""))
                 print_rows(rows)
             except RuntimeError as e:
                 print(f"  {e}\n  -> enable Codex/ChatGPT: run 'codex login' (uses your subscription)")

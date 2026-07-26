@@ -22,13 +22,13 @@ from collections import Counter
 
 from textual import work
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll, Grid
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
+from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static, Select, TextArea, Button
 from rich.markup import escape
 from rich.text import Text
 
-from kash import nl, query
+from kash import nl, preferences, query, status
 from kash.access import Access
 from kash.schema import FIELD_ORDER
 from kash.store import Store
@@ -36,6 +36,7 @@ from kash.store import Store
 HERE = os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(HERE, "pool.db")
 ENV = os.path.join(HERE, ".env")
+PREFS = os.path.join(HERE, "preferences.yaml")
 MAX_TABLE = 100          # show up to the first 100 rows
 
 COLUMNS = [
@@ -65,40 +66,91 @@ def _cell(v):
     return str(v)
 
 
-def _parse_access_input(raw: str) -> dict:
-    """Parse one access-editor line into fields understood by ``Access``."""
-    try:
-        tokens = shlex.split(raw)
-    except ValueError:
-        tokens = raw.split()
-    if not tokens or not tokens[0].lstrip("-").isdigit():
-        raise ValueError("Enter a numeric Telegram ID")
+class AccessFormScreen(ModalScreen):
+    CSS = """
+    AccessFormScreen { align: center middle; }
+    #fbox { width: 60; height: auto; border: thick $accent; background: $surface; padding: 1 2; }
+    .row { height: 3; margin-bottom: 1; }
+    .label { width: 15; content-align: right middle; margin-right: 1; }
+    .input { width: 1fr; }
+    #f-msg-box { height: 5; margin-bottom: 1; }
+    #f-greet-box { height: 8; margin-bottom: 1; }
+    #f-buttons { height: 3; align: right middle; }
+    """
 
-    parsed = {
-        "user_id": int(tokens[0]),
-        "name": None,
-        "status": None,
-        "access_level": None,
-        "first_message": None,
-    }
-    bare = []
-    for token in tokens[1:]:
-        if "=" not in token:
-            bare.append(token)
-            continue
-        key, value = token.split("=", 1)
-        key = key.lower()
-        if key == "name":
-            parsed["name"] = value
-        elif key == "status":
-            parsed["status"] = value.lower()
-        elif key in ("access", "access_level"):
-            parsed["access_level"] = value.lower()
-        elif key in ("message", "first_message"):
-            parsed["first_message"] = value
-    if bare and parsed["name"] is None:
-        parsed["name"] = " ".join(bare)
-    return parsed
+    def __init__(self, access, existing_row=None):
+        super().__init__()
+        self.access = access
+        self.r = existing_row or {}
+        self.is_new = not bool(existing_row)
+
+    def compose(self) -> ComposeResult:
+        title = "Add User" if self.is_new else f"Edit User {self.r.get('telegram_user_id')}"
+        with Vertical(id="fbox"):
+            yield Static(f"[b]{title}[/b]", style="margin-bottom: 1;")
+            
+            with Horizontal(classes="row"):
+                yield Static("User ID:", classes="label")
+                uid_input = Input(str(self.r.get("telegram_user_id", "")), 
+                                  placeholder="123456789", id="f-uid", classes="input")
+                if not self.is_new:
+                    uid_input.disabled = True
+                yield uid_input
+                
+            with Horizontal(classes="row"):
+                yield Static("Name:", classes="label")
+                yield Input(str(self.r.get("name") or ""), placeholder="Jane Doe", id="f-name", classes="input")
+                
+            with Horizontal(classes="row"):
+                yield Static("Status:", classes="label")
+                yield Select([("allowed", "allowed"), ("pending", "pending"), ("denied", "denied")], 
+                             value=self.r.get("status", "allowed"), id="f-status", classes="input")
+                
+            with Horizontal(classes="row"):
+                yield Static("Access:", classes="label")
+                yield Select([("read", "read")], value=self.r.get("access_level", "read"), 
+                             id="f-access", classes="input", disabled=True)
+                
+            with Horizontal(id="f-msg-box"):
+                yield Static("First Msg:", classes="label")
+                msg = TextArea(str(self.r.get("first_message") or ""), id="f-msg", classes="input", read_only=True)
+                msg.border_title = "Audit Log (Read Only)"
+                yield msg
+                
+            with Horizontal(id="f-greet-box"):
+                yield Static("Greeting:", classes="label")
+                greet = TextArea(str(self.r.get("custom_greeting") or ""), id="f-greet", classes="input")
+                greet.border_title = "Custom Bot Reply"
+                yield greet
+
+            yield Static("", id="f-error", style="color: red; margin-bottom: 1;")
+            
+            with Horizontal(id="f-buttons"):
+                yield Button("Cancel", id="btn-cancel", variant="default")
+                yield Button("Done", id="btn-done", variant="primary", style="margin-left: 2;")
+
+    def on_button_pressed(self, event: Button.Pressed):
+        if event.button.id == "btn-cancel":
+            self.dismiss(False)
+            return
+            
+        if event.button.id == "btn-done":
+            uid_str = self.query_one("#f-uid", Input).value.strip()
+            if not uid_str.isdigit():
+                self.query_one("#f-error", Static).update("User ID must be numeric.")
+                return
+            uid = int(uid_str)
+            name = self.query_one("#f-name", Input).value.strip() or None
+            status = self.query_one("#f-status", Select).value
+            access = self.query_one("#f-access", Select).value
+            greet = self.query_one("#f-greet", TextArea).text.strip() or None
+            
+            if self.is_new:
+                self.access.add(uid, name=name, status=status, custom_greeting=greet)
+            else:
+                self.access.edit(uid, name=name, status=status, access_level=access, custom_greeting=greet)
+                
+            self.dismiss(True)
 
 
 class AccessScreen(ModalScreen):
@@ -107,8 +159,7 @@ class AccessScreen(ModalScreen):
     AccessScreen { align: center middle; }
     #abox { width: 98; height: 34; border: thick $accent; background: $surface; padding: 1 2; }
     #atitle { text-style: bold; }
-    #acl { height: 1fr; }
-    #addbox { border: tall $accent; }
+    #acl { height: 1fr; margin-top: 1; margin-bottom: 1; }
     """
     BINDINGS = [
         ("escape", "close", "Close"),
@@ -119,8 +170,6 @@ class AccessScreen(ModalScreen):
         ("x", "remove", "Remove"),
         ("r", "reload_list", "Refresh"),
     ]
-    STATUSES = {"pending", "allowed", "denied"}
-    ACCESS_LEVELS = {"read"}     # read-only for everyone, by design
 
     def __init__(self, access):
         super().__init__()
@@ -132,12 +181,11 @@ class AccessScreen(ModalScreen):
             yield Static("Telegram bot access — @Kash_Realestate_Property_bot (read-only)", id="atitle")
             yield Static("n add ID  ·  e edit  ·  a approve  ·  d deny  ·  x remove  ·  r refresh  ·  esc close")
             yield DataTable(id="acl", cursor_type="row", zebra_stripes=True)
-            yield Input(placeholder='Add/edit: 123456789 name="Jane" status=allowed message="Hello" — Enter', id="addbox")
             yield Static("", id="astatus")
 
     def on_mount(self):
         t = self.query_one("#acl", DataTable)
-        t.add_columns("User ID", "Name", "Status", "Access", "First message")
+        t.add_columns("User ID", "Name", "Status", "Greeting", "First message")
         self.reload_list()
 
     def reload_list(self):
@@ -145,8 +193,10 @@ class AccessScreen(ModalScreen):
         t.clear()
         self._rows = self.access.all()
         for r in self._rows:
+            greet = r.get("custom_greeting")
+            greet_disp = "✓ set" if greet else "-"
             t.add_row(str(r["telegram_user_id"]), r.get("name") or "-", r["status"],
-                      r.get("access_level") or "read",
+                      greet_disp,
                       escape((r.get("first_message") or "")[:36]),
                       key=str(r["telegram_user_id"]))
         pending = sum(1 for r in self._rows if r["status"] == "pending")
@@ -178,64 +228,20 @@ class AccessScreen(ModalScreen):
     def action_reload_list(self):
         self.reload_list()
 
+    def _on_form_dismissed(self, changed: bool):
+        if changed:
+            self.reload_list()
+            self.query_one("#acl", DataTable).focus()
+
     def action_focus_add(self):
-        self.query_one("#addbox", Input).focus()
+        self.app.push_screen(AccessFormScreen(self.access), self._on_form_dismissed)
 
     def action_edit(self):
         i = self.query_one("#acl", DataTable).cursor_row
         if not (self._rows and 0 <= i < len(self._rows)):
             return
         r = self._rows[i]
-        name = r.get("name") or ""
-        parts = [str(r["telegram_user_id"])]
-        if name and name != "-":
-            parts.append(f"name={shlex.quote(name)}")
-        parts.extend([
-            f"status={r['status']}",
-            f"access={r.get('access_level') or 'read'}",
-            f"message={shlex.quote(r.get('first_message') or '')}",
-        ])
-        box = self.query_one("#addbox", Input)
-        box.value = " ".join(parts)
-        box.focus()
-        self.query_one("#astatus", Static).update(
-            f"[b]editing {r['telegram_user_id']}[/] — change fields, Enter to save")
-
-    def on_input_submitted(self, event: Input.Submitted):
-        if event.input.id != "addbox":
-            return
-        event.stop()
-        raw = event.value.strip()
-        event.input.value = ""
-        status_line = self.query_one("#astatus", Static)
-        try:
-            parsed = _parse_access_input(raw)
-        except ValueError as exc:
-            status_line.update(f"[b red]{exc}[/]")
-            return
-        uid = parsed["user_id"]
-        name = parsed["name"]
-        status = parsed["status"]
-        access = parsed["access_level"]
-        first_message = parsed["first_message"]
-        if status and status not in self.STATUSES:
-            status_line.update(f"[b red]status must be {' / '.join(sorted(self.STATUSES))}[/]")
-            return
-        if access and access not in self.ACCESS_LEVELS:
-            status_line.update("[b red]access is read-only for all users[/]")
-            return
-        exists = any(r["telegram_user_id"] == uid for r in self._rows)
-        if exists:
-            self.access.edit(uid, name=name, status=status, access_level=access,
-                             first_message=first_message)
-            verb = "Updated"
-        else:
-            self.access.add(uid, name, status=status or "allowed",
-                            first_message=first_message)
-            verb = "Added"
-        self.reload_list()
-        status_line.update(f"[b green]{verb} {uid}[/]")
-        self.query_one("#acl", DataTable).focus()
+        self.app.push_screen(AccessFormScreen(self.access, existing_row=r), self._on_form_dismissed)
 
     def action_close(self):
         self.dismiss()
@@ -248,6 +254,7 @@ class KashDashboard(App):
     #table { width: 3fr; }
     #side { width: 1fr; min-width: 30; }
     #stats { height: auto; border: round $accent; padding: 0 1; }
+    #acquisition { height: auto; border: round $secondary; padding: 0 1; margin-top: 1; }
     #detailbox { height: 1fr; border: round $primary; }
     #detail { padding: 0 1; }
     #chatzone { height: 15; }
@@ -270,6 +277,7 @@ class KashDashboard(App):
         super().__init__()
         self.store = Store(DB)
         self.access = Access(self.store)
+        self.prefs = preferences.load(PREFS) if os.path.exists(PREFS) else {}
         self.rows: list[dict] = []
 
     def compose(self) -> ComposeResult:
@@ -279,6 +287,7 @@ class KashDashboard(App):
             yield DataTable(id="table", cursor_type="row", zebra_stripes=True)
             with Vertical(id="side"):
                 yield Static(id="stats")
+                yield Static(id="acquisition")
                 with VerticalScroll(id="detailbox"):
                     yield Static("Select a row to see its full record.", id="detail")
         with Vertical(id="chatzone"):
@@ -335,6 +344,10 @@ class KashDashboard(App):
         lines.append("[b]Src[/b]    " + "  ".join(f"{k}:{v}" for k, v in src.items()))
         self.query_one("#stats", Static).update("\n".join(lines))
 
+    def render_acquisition(self):
+        summary = status.acquisition_summary(self.store, self.prefs)
+        self.query_one("#acquisition", Static).update(status.format_acquisition_summary(summary))
+
     def render_detail(self, r):
         """Show the full record of the highlighted row — every populated field. Scrolls."""
         price = f"${r['list_price']:,}" if r.get("list_price") else ""
@@ -387,26 +400,30 @@ class KashDashboard(App):
             # a question typed in the filter bar — send it to chat instead of failing
             self.chat_send(text)
 
-    # --- chat channel (Codex, in-terminal) ---
+    # --- chat channel (in-terminal; backend picked by the llm ladder in preferences.yaml) ---
     def chat_send(self, message: str):
         if not message:
             return
         log = self.query_one("#chatlog", RichLog)
         log.write(f"[b]you:[/]  {message}")
-        self.sub_title = "thinking (Codex)…"
+        self.sub_title = "thinking…"
         self.chat_worker(message)
 
     @work(thread=True, exclusive=True)
     def chat_worker(self, message: str):
+        rung = None
         try:
-            reply, rows = nl.converse(message, self.store)
+            backend = nl.route(self.prefs)
+            reply, rows = nl.converse(message, self.store, backend=backend)
+            rung = backend.chosen
         except Exception as e:  # noqa: BLE001
             reply, rows = (f"error: {e}", [])
-        self.call_from_thread(self.chat_result, reply, rows)
+        self.call_from_thread(self.chat_result, reply, rows, rung)
 
-    def chat_result(self, reply: str, rows: list):
+    def chat_result(self, reply: str, rows: list, rung: str = None):
         log = self.query_one("#chatlog", RichLog)
-        log.write(f"[b cyan]Robo Kash:[/]  {reply}")
+        tag = f" [dim]({rung})[/dim]" if rung else ""
+        log.write(f"[b cyan]Robo Kash:[/]{tag}  {reply}")
         if rows:
             self.set_rows(rows, note=f"{len(rows)} listings (from chat)")
             log.write(f"[dim]→ table updated with {min(len(rows), MAX_TABLE)} listing(s)[/dim]")
@@ -450,6 +467,7 @@ class KashDashboard(App):
         rows.sort(key=lambda r: (r.get("rank") is None, r.get("rank") or 0, r.get("tier") or "Z"))
         self.set_rows(rows)
         self.render_stats()
+        self.render_acquisition()
 
 
 if __name__ == "__main__":

@@ -13,6 +13,15 @@ from typing import Optional
 import yaml
 
 
+def validate_source_names(names, registry) -> list[str]:
+    """Reject configured/manual sources that lack a registered adapter."""
+    names = list(names)
+    unsupported = sorted(set(names) - set(registry))
+    if unsupported:
+        raise ValueError(f"Unsupported source(s): {', '.join(unsupported)}")
+    return names
+
+
 def derive_from_csv(csv_path: str) -> dict:
     zips, types, hoods, prices = set(), set(), set(), []
     with open(csv_path, newline="", encoding="utf-8") as f:
@@ -31,8 +40,12 @@ def derive_from_csv(csv_path: str) -> dict:
     hi = int(max(prices) * 1.15) if prices else None
     return {
         "market": "Staten Island, NY",
+        # HARD allow-list: the pipeline admits only these ZIPs (kash/pipeline.py::_in_scope).
+        # Derived from the seed, so it is exactly where you've been shopping — widen it by hand
+        # to discover new areas, or set it to [] to fall back to zip_prefixes alone.
         "zips": sorted(zips),
-        # keep results on-island: SI ZIPs are 103xx (drops NJ bleed from map bounds)
+        # Coarser boundary used only when `zips` is empty: SI ZIPs are 103xx (drops the NJ
+        # bleed that the Zillow map bounds pull in).
         "zip_prefixes": sorted({z[:3] for z in zips}) or ["103"],
         "price": {"min": lo, "max": hi},
         "property_types": sorted(types),
@@ -44,21 +57,45 @@ def derive_from_csv(csv_path: str) -> dict:
             "down_payment_pct": 0.20,
             "term_years": 30,
         },
-        # NL 'ask' mode backend. codex = ChatGPT via OAuth (no API key). model: null =
-        # subscription default. timeout in seconds.
-        "llm": {"backend": "codex", "model": None, "timeout": 120},
+        # NL 'ask' mode backends. `backend: auto` walks `ladder` and skips any rung that is
+        # unavailable (CLI missing/logged out, no API key) or that errors, so one dead provider
+        # can't take the assistant down. Pin `backend` to a single name to disable the ladder
+        # and use exactly that rung. codex = ChatGPT subscription via the codex CLI; claude_cli
+        # = Claude subscription via the claude CLI; both are OAuth, no API key and no per-token
+        # billing. anthropic = the Claude API, metered, off the ladder unless you add a key.
+        # available_ttl caps how often a rung is probed (codex's probe shells out to
+        # `codex login status`). Timeouts in seconds.
+        "llm": {
+            "backend": "auto",
+            # Per-job ladders: chat has a user waiting so it is ordered for latency, while rank
+            # is a nightly judgment call where depth matters and slow rungs are acceptable.
+            "ladders": {
+                "chat": ["codex", "claude_cli"],
+                "extract": ["claude_cli", "codex"],
+                "rank": ["codex", "claude_cli", "agy_cli"],
+            },
+            "ladder": ["codex", "claude_cli"],
+            "timeout": 120,
+            "available_ttl": 60,
+            "backends": {
+                "codex": {"bin": "codex", "model": None, "timeout": 120},
+                "claude_cli": {"bin": "claude", "model": "haiku", "timeout": 120},
+                "agy_cli": {"bin": "agy", "model": "gemini-3.5-flash-low",
+                            "timeout": 180, "retries": 2},
+                "anthropic": {"model": "claude-haiku-4-5", "max_tokens": 1024, "timeout": 60},
+            },
+        },
         # Per-source scrape cadence + caps. Staggered to spread Apify credit.
         "sources": {
             "zillow": {"every_days": 1, "results_limit": 40},
-            "realtor": {"every_days": 2, "results_limit": 40},
-            "redfin": {"every_days": 3, "results_limit": 40},
             "rentcast": {"every_days": 7},
         },
         # Rotating coverage: sweep the price range one band per run (see kash/sweep.py).
         "sweep": {"band_step": 80000},
-        "rank": {"max_per_run": 15},       # Codex auto-ranks up to N new listings / run
+        "rank": {"max_per_run": 15},       # auto-ranks up to N new listings / run
         "enrich": {"max_per_run": 50},     # geocode + flood + neighborhood / run
         "detail": {"max_per_run": 15},     # Zillow detail scrape up to N new rows / run
+        "describe": {"max_per_run": 15},   # LLM description signals / run (idempotent per row)
     }
 
 

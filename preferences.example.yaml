@@ -1,4 +1,6 @@
 market: Staten Island, NY
+# Hard allow-list — only these ZIPs are admitted to the pool. Widen it to discover new
+# areas, or set it to [] to fall back to zip_prefixes alone.
 zips:
   - "10304"
   - "10306"
@@ -10,7 +12,7 @@ zip_prefixes:
   - "103"
 price:
   min: 550000
-  max: 1150000
+  max: 800000
 property_types:
   - sf_attached
   - sf_detached
@@ -18,15 +20,57 @@ property_types:
   - 2fam_detached
 neighborhoods: []
 beds_min: 3
+eligibility:
+  excluded_property_types: [condo, apartment, lot]
+  store_min_baths: 2
+  telegram_min_baths: 2.5
+  telegram_max_price: 800000
+  safe_flood_zones: [X]
+telegram_recipient_ids: [7512954760, 5143942438]
 fetch_limit: 100
 finance:
   rate: 0.063
   down_payment_pct: 0.20
   term_years: 30
 llm:
-  backend: codex
-  model: null
+  backend: auto            # auto = use the ladders below; or pin: codex, claude_cli, agy_cli
+  # Per-job ladders. The jobs have opposite priorities, so they don't share one policy:
+  # chat has a user waiting (latency wins), rank runs overnight (depth wins).
+  ladders:
+    chat:
+      - codex              # ChatGPT subscription via the codex CLI — no API key
+      - claude_cli         # Claude subscription via the claude CLI — no API key
+    extract:
+      - claude_cli
+      - codex
+    rank:
+      - codex
+      - claude_cli
+      - agy_cli            # Gemini Pro subscription via the Antigravity CLI — no API key
+  ladder:                  # fallback for any job not named above
+    - codex
+    - claude_cli
+    # - anthropic          # Claude API; needs ANTHROPIC_API_KEY, billed per token
   timeout: 120
+  available_ttl: 60        # seconds between availability probes per backend
+  backends:
+    codex:
+      bin: codex
+      model: null          # null = whatever your codex subscription defaults to
+      timeout: 120
+    claude_cli:
+      bin: claude
+      model: haiku         # haiku | sonnet | opus — haiku is ample for a query spec
+      timeout: 120
+    agy_cli:
+      bin: agy
+      model: gemini-3.5-flash-low   # see `agy models` for the full list
+      timeout: 180         # ~19s/call typical; it is the slowest rung
+      retries: 2           # no --json-schema flag, so parse failures are retried
+    anthropic:
+      model: claude-haiku-4-5
+      max_tokens: 1024
+      timeout: 60
 sources:
   zillow:
     every_days: 1
@@ -41,3 +85,5 @@ enrich:
   max_per_run: 50
 detail:
   max_per_run: 15
+describe:
+  max_per_run: 15        # LLM description signals per run; idempotent, one call per new row

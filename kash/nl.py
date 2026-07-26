@@ -52,22 +52,34 @@ def _prompt(question: str) -> str:
     )
 
 
-def get_backend(config=None):
+def route(config=None, override=None, job="chat"):
+    """Build the backend ladder for one request.
+
+    `config` is the whole preferences dict (we pull the `llm:` block out of it); `override` pins
+    a single backend by name, e.g. from a per-user `model` command. Defaults to the `chat` job,
+    whose ladder is ordered for latency because a user is waiting on the reply. Read `.chosen`
+    off the returned object after a call to find out which rung actually answered.
+    """
     from . import llm
-    return llm.get_backend((config or {}).get("llm"))
+    return llm.route((config or {}).get("llm"), override, job)
 
 
-def available(config=None) -> tuple[bool, str]:
+def get_backend(config=None):
+    """Backward-compatible alias — returns the same ladder `route()` builds."""
+    return route(config)
+
+
+def available(config=None, override=None) -> tuple[bool, str]:
     try:
-        return get_backend(config).available()
+        return route(config, override).available()
     except Exception as e:  # noqa: BLE001
         return False, str(e)
 
 
-def answer(question: str, store, config=None, backend=None):
-    """Return (message, rows). Raises RuntimeError if the backend is unavailable."""
+def answer(question: str, store, config=None, backend=None, override=None):
+    """Return (message, rows). Raises RuntimeError if no backend is available."""
     from . import query
-    backend = backend or get_backend(config)
+    backend = backend or route(config, override)
     ok, why = backend.available()
     if not ok:
         raise RuntimeError(f"NL backend ({backend.name}) unavailable: {why}")
@@ -129,10 +141,10 @@ def _chat_prompt(message: str) -> str:
     )
 
 
-def converse(message: str, store, config=None, backend=None):
-    """Return (reply_text, rows). For chat, rows is empty. Raises if backend unavailable."""
+def converse(message: str, store, config=None, backend=None, override=None):
+    """Return (reply_text, rows). For chat, rows is empty. Raises if no backend is available."""
     from . import query
-    backend = backend or get_backend(config)
+    backend = backend or route(config, override)
     ok, why = backend.available()
     if not ok:
         raise RuntimeError(f"NL backend ({backend.name}) unavailable: {why}")
