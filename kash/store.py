@@ -45,11 +45,22 @@ def _from_db(field: str, value):
 
 class Store:
     def __init__(self, db_path: str, finance_cfg: Optional[dict] = None):
-        # check_same_thread=False: the TUI 'ask' worker and the Telegram bot read from
-        # a background thread. Reads only from those threads; writes stay single-threaded.
+        # check_same_thread=False: the TUI 'ask' worker and the Telegram bot both touch the
+        # store from a background thread. Writes are no longer single-threaded either — usage
+        # metering records on the chat path, and the 07:00 update job writes concurrently.
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.db_path = db_path
         self.conn.row_factory = sqlite3.Row
+        # WAL lets readers proceed during a write instead of blocking, and busy_timeout turns
+        # an immediate "database is locked" into a short wait. Without both, a chat question
+        # landing during the nightly run would raise rather than queue. Guarded because WAL is
+        # unavailable on some filesystems (network mounts), where the rollback journal still
+        # works correctly, just with coarser locking.
+        try:
+            self.conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.DatabaseError:
+            pass
+        self.conn.execute("PRAGMA busy_timeout=5000")
         self.finance_cfg = finance_cfg or {}
         self.bootstrap()
 
