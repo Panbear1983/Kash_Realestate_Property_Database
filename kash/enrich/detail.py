@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import os
 import re
+from urllib.parse import urlparse
 
 import requests
 
 from ..dedup import match_key
+from ..signals import priority_note
 
 ACTOR = "maxcopell~zillow-detail-scraper"
 RUN = "https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items"
@@ -32,7 +34,10 @@ def _zpid(url: str):
 def _needs_detail(r: dict) -> bool:
     # any Zillow homedetails link (has a zpid) not yet detailed (year_built as sentinel)
     u = r.get("listing_url") or ""
-    return bool("zillow.com" in u and _zpid(u) and not r.get("year_built"))
+    parsed = urlparse(u)
+    host = (parsed.hostname or "").lower()
+    is_zillow = host == "zillow.com" or host.endswith(".zillow.com")
+    return bool(parsed.scheme == "https" and is_zillow and _zpid(u) and not r.get("year_built"))
 
 
 def enrich_details(store, limit: int = 15) -> dict:
@@ -95,6 +100,7 @@ def _normalize(it: dict) -> dict:
     ht = it.get("homeType")
     ph = it.get("priceHistory") or []
     lot = it.get("lotAreaValue") or it.get("lotSize")
+    description = (it.get("description") or "")[:1000] or None
     return {
         "year_built": it.get("yearBuilt") or rf.get("yearBuilt"),
         "lot_size_sqft": int(lot) if lot else None,
@@ -107,7 +113,8 @@ def _normalize(it: dict) -> dict:
         "mls_number": ai.get("mlsId"),
         "listing_agent": ai.get("agentName"),
         "photo_count": it.get("photoCount"),
-        "listing_description": (it.get("description") or "")[:1000] or None,
+        "listing_description": description,
+        "priority_note": priority_note(description),
         "last_sold_price": it.get("lastSoldPrice"),
         "original_list_price": _original_list(ph),
         "price_history": _price_history(ph),

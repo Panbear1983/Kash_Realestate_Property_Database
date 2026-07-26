@@ -85,6 +85,7 @@ class RentCastAdapter(SourceAdapter):
             "listing_agent": _dig(raw, "listingAgent", "name"),
             "listing_brokerage": _dig(raw, "listingOffice", "name"),
             "status": "active",
+            "listing_url": raw.get("listingUrl"),
             "source_url": raw.get("listingUrl"),
             "fetched_at": date.today().isoformat(),
         }

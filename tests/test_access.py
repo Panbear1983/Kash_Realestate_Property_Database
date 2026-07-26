@@ -5,7 +5,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from dashboard import _parse_access_input  # noqa: E402
+# Removed _parse_access_input from dashboard
 from kash.access import Access              # noqa: E402
 from kash.store import Store                # noqa: E402
 
@@ -32,26 +32,28 @@ def test_first_message_editing():
     store.close()
 
 
-def test_dashboard_access_input():
-    parsed = _parse_access_input(
-        '123456789 name="Jane Doe" status=allowed access=read '
-        'message="Hello from the dashboard"'
-    )
-    assert parsed == {
-        "user_id": 123456789,
-        "name": "Jane Doe",
-        "status": "allowed",
-        "access_level": "read",
-        "first_message": "Hello from the dashboard",
-    }
+def test_custom_greeting():
+    store = Store(":memory:")
+    access = Access(store)
 
-    alias = _parse_access_input("123 first_message='Custom text'")
-    assert alias["first_message"] == "Custom text"
-    cleared = _parse_access_input("123 message='' ")
-    assert cleared["first_message"] == ""
+    assert access.get_greeting(101) is None
+    access.add(101, "Jane", custom_greeting="Hi Jane!")
+    assert access.get_greeting(101) == "Hi Jane!"
 
+    access.edit(101, custom_greeting="Welcome back Jane")
+    assert access.get_greeting(101) == "Welcome back Jane"
+    
+    # omitting custom_greeting should not clear it
+    access.edit(101, name="Jane Doe")
+    assert access.get_greeting(101) == "Welcome back Jane"
+    
+    # explicitly clearing
+    access.edit(101, custom_greeting="")
+    assert access.get_greeting(101) is None
+    
+    store.close()
 
 if __name__ == "__main__":
     test_first_message_editing()
-    test_dashboard_access_input()
-    print("PASS — access first-message add/edit/parser behavior OK")
+    test_custom_greeting()
+    print("PASS — access first-message add/edit and custom greeting behavior OK")
