@@ -16,7 +16,8 @@ import json
 from typing import Optional
 
 from .dedup import match_key
-from .llm import get_backend
+from .llm import route
+from .signals import multigenerational
 
 RANK_SCHEMA = {
     "type": "object", "additionalProperties": False,
@@ -39,8 +40,15 @@ _FACTS = ["neighborhood", "zip", "property_type", "list_price", "beds", "baths",
           "estimated_rent_monthly", "days_on_market"]
 
 
+_SIGNALS = ["signal_multigenerational", "signal_separate_entrance", "signal_second_kitchen",
+            "signal_condition", "signal_friction"]
+
+
 def _prompt(listing: dict, prefs: dict, exemplars: list[dict]) -> str:
     facts = {k: listing.get(k) for k in _FACTS if listing.get(k) is not None}
+    # Description signals (kash/enrich/describe.py) — the numeric facts alone say nothing about
+    # multigenerational capability or renovation burden, which is most of the thesis.
+    signals = {k[len("signal_"):]: listing.get(k) for k in _SIGNALS if listing.get(k) is not None}
     ex = "\n".join(
         f"- {e.get('street_address')} ({e.get('neighborhood')}, ${e.get('list_price')}, "
         f"{e.get('beds')}bd/{e.get('baths')}ba, GS {e.get('school_gs_rating')}, "
@@ -60,12 +68,25 @@ def _prompt(listing: dict, prefs: dict, exemplars: list[dict]) -> str:
         "favors strong school ratings (GS) and low flood risk (flood_zone X), penalizes "
         "AE/VE flood zones.\n"
         f"Examples from their curated list:\n{ex}\n\n"
-        f"Listing to rank: {json.dumps(facts)}"
+        f"Listing to rank: {json.dumps(facts)}\n"
+        + (f"Description signals: {json.dumps(signals)}" if signals else
+           "Description signals: none extracted yet.")
     )
 
 
+def apply_property_priority(updates: dict, listing: dict) -> dict:
+    """Apply non-negotiable buyer preferences after model ranking."""
+    updates = dict(updates)
+    is_multigen, why = multigenerational(listing)
+    if is_multigen:
+        updates["view_priority"] = "now"
+        updates["analysis"] = f"TOP PRIORITY: {why}. " + (updates.get("analysis") or "")
+    return updates
+
+
 def rank_new(store, prefs: dict, limit: Optional[int] = 15, backend=None) -> dict:
-    backend = backend or get_backend(prefs.get("llm"))
+    # 'rank' ladder: a nightly judgment call, so depth beats latency here.
+    backend = backend or route(prefs.get("llm"), job="rank")
     ok, why = backend.available()
     if not ok:
         return {"ranked": 0, "skipped": why}
@@ -95,6 +116,7 @@ def rank_new(store, prefs: dict, limit: Optional[int] = 15, backend=None) -> dic
             "appreciation_pct": spec.get("appreciation_pct"),
             "analysis": "[auto] " + (spec.get("analysis") or ""),
         }
+        updates = apply_property_priority(updates, r)
         store.update_fields(key, {k: v for k, v in updates.items() if v is not None})
         ranked += 1
     return {"ranked": ranked, "candidates": len(new)}

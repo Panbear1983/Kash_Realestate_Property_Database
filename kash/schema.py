@@ -12,7 +12,8 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 # --- field classification (single source of truth for store + merge) -----------
 
-BOOL_FIELDS = {"is_multifamily", "school_verified", "favorite", "contacted_agent"}
+BOOL_FIELDS = {"is_multifamily", "school_verified", "favorite", "contacted_agent",
+               "signal_multigenerational", "signal_separate_entrance", "signal_second_kitchen"}
 INT_FIELDS = {
     "rank", "list_price", "sqft", "price_per_sqft", "days_on_market", "zestimate",
     "target_buy_price", "arv_estimate", "brrrr_rating", "bid_estimate",
@@ -25,7 +26,7 @@ REAL_FIELDS = {
     "appreciation_pct", "price_drop_pct", "cap_rate", "cash_on_cash",
     "latitude", "longitude",
 }
-JSON_FIELDS = {"price_history"}
+JSON_FIELDS = {"price_history", "signal_friction"}
 
 # Fields a data source must NEVER overwrite on merge — your judgment + workflow state.
 USER_PROTECTED = {
@@ -135,6 +136,18 @@ class Listing(BaseModel):
     # --- D3. media ---
     primary_photo_url: Optional[str] = None
     virtual_tour_url: Optional[str] = None
+
+    # --- E. extracted description signals (machine-owned; see kash/enrich/describe.py) ---
+    # What kash/signals.py approximates with substring matching, read semantically from the
+    # listing description. `signal_evidence` quotes the source text so any flag is auditable,
+    # and `signal_extracted_at` makes extraction idempotent across runs.
+    signal_multigenerational: Optional[bool] = None
+    signal_separate_entrance: Optional[bool] = None
+    signal_second_kitchen: Optional[bool] = None
+    signal_condition: Optional[Literal["turnkey", "cosmetic", "gut"]] = None
+    signal_friction: Optional[List[Any]] = None
+    signal_evidence: Optional[str] = None
+    signal_extracted_at: Optional[str] = None
 
     # --- provenance ---
     source: Optional[str] = None

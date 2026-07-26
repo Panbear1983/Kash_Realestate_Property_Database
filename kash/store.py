@@ -69,9 +69,33 @@ class Store:
               source TEXT,
               ts TEXT
             );
+            CREATE TABLE IF NOT EXISTS notification_delivery (
+              recipient_id INTEGER,
+              kind TEXT,
+              ts TEXT,
+              PRIMARY KEY (recipient_id, kind)
+            );
             """
         )
+        self._migrate_columns()
         self.conn.commit()
+
+    def _migrate_columns(self):
+        """Add any schema field missing from an existing `listings` table.
+
+        CREATE TABLE IF NOT EXISTS above is a no-op once the table exists, so a new field on
+        the Listing model would otherwise never reach a live pool.db. Same defensive shape as
+        kash/access.py's custom_greeting migration. Additive only — never drops or rewrites a
+        column, so user-owned values (analysis, my_notes, tier) are untouched.
+        """
+        existing = {row[1] for row in self.conn.execute("PRAGMA table_info(listings)")}
+        if not existing:
+            return
+        for field in FIELD_ORDER:
+            if field not in existing:
+                self.conn.execute(
+                    f'ALTER TABLE listings ADD COLUMN "{field}" {sqlite_type(field)}'
+                )
 
     # --- reads ---
     def get(self, key: str) -> Optional[dict]:
@@ -99,6 +123,19 @@ class Store:
             "SELECT * FROM changelog ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def notification_sent(self, recipient_id: int, kind: str) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM notification_delivery WHERE recipient_id=? AND kind=?",
+            (int(recipient_id), kind),
+        ).fetchone() is not None
+
+    def mark_notification_sent(self, recipient_id: int, kind: str) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO notification_delivery (recipient_id,kind,ts) VALUES (?,?,?)",
+            (int(recipient_id), kind, date.today().isoformat()),
+        )
+        self.conn.commit()
 
     # --- writes ---
     def _log(self, key: str, event: str, detail: str, source: str):
