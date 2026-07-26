@@ -17,6 +17,11 @@ import os
 
 from kash.adapters import REGISTRY
 from kash import orchestrator, preferences, schedule
+from kash.access import Access
+from kash.notifications import (
+    format_onboarding, format_testing_digest, listing_delivery_kind, testing_recipients,
+    unsent_actionable_listings,
+)
 from kash.store import Store
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -47,18 +52,22 @@ def auto_sources():
     return chosen or ["mock"]
 
 
-def push_telegram(text):
+def push_telegram(text, chat_ids: list[int], request_get=None) -> dict[int, str]:
     tok = os.environ.get("KASH_BOT_TOKEN")
-    chat = os.environ.get("KASH_CHAT_ID")
-    if not (tok and chat):
-        return "skipped (no KASH_BOT_TOKEN / KASH_CHAT_ID)"
-    try:
+    if not tok:
+        return {int(chat_id): "skipped (no KASH_BOT_TOKEN)" for chat_id in chat_ids}
+    if request_get is None:
         import requests
-        r = requests.get(f"https://api.telegram.org/bot{tok}/sendMessage",
-                         params={"chat_id": chat, "text": text[:4000]}, timeout=20)
-        return "sent" if r.json().get("ok") else r.json().get("description", "fail")
-    except Exception as e:  # noqa: BLE001
-        return f"error: {e}"
+        request_get = requests.get
+    outcomes = {}
+    for chat_id in chat_ids:
+        try:
+            r = request_get(f"https://api.telegram.org/bot{tok}/sendMessage",
+                            params={"chat_id": int(chat_id), "text": text[:4000]}, timeout=20)
+            outcomes[int(chat_id)] = "sent" if r.json().get("ok") else r.json().get("description", "fail")
+        except Exception as e:  # noqa: BLE001
+            outcomes[int(chat_id)] = f"error: {e}"
+    return outcomes
 
 
 def main():
@@ -75,12 +84,30 @@ def main():
     load_dotenv(DEFAULT_ENV)
     prefs = preferences.ensure(args.prefs, args.csv)
 
+    # Derive the export and run-state paths from the database being used. Previously both were
+    # hardcoded to the repo, so `--db /tmp/copy.db` still overwrote the real pool_export.csv and
+    # advanced the real .last_run.json (which rotates the sweep price band) — a test against a
+    # copy silently mutated production state.
+    db_dir = os.path.dirname(os.path.abspath(args.db))
+    db_stem = os.path.splitext(os.path.basename(args.db))[0]
+    is_default_db = os.path.abspath(args.db) == os.path.abspath(DEFAULT_DB)
+    state_path = STATE_PATH if is_default_db else os.path.join(db_dir, f".{db_stem}_run.json")
+    export_path = (DEFAULT_EXPORT if is_default_db
+                   else os.path.join(db_dir, f"{db_stem}_export.csv"))
+    if not is_default_db:
+        print(f"[non-default --db] state -> {state_path}\n"
+              f"                   export -> {export_path}")
+
     store = Store(args.db, finance_cfg=prefs.get("finance"))
     if store.count() == 0:
         print(f"Seeded pool from CSV: {store.seed_from_csv(args.csv)} rows")
 
-    state = schedule.load(STATE_PATH)
+    state = schedule.load(state_path)
     requested = args.sources.split(",") if args.sources else auto_sources()
+    try:
+        requested = preferences.validate_source_names(requested, REGISTRY)
+    except ValueError as exc:
+        ap.error(str(exc))
     due = requested if (args.sources or args.force) else schedule.which_due(requested, prefs, state)
     if not due:
         print("No sources due today (per cadence). Use --force to run anyway.")
@@ -110,21 +137,49 @@ def main():
         else:
             print(f"  [{s['source']}] fetched {s['fetched']}  +{s['inserted']} new  "
                   f"~{s['updated']} updated  ({s['out_of_scope']} off-scope)")
-    print(f"  detail: {result['detail']}   enrich: {result['enrich']}   rank: {result['rank']}")
+    print(f"  detail: {result['detail']}   enrich: {result['enrich']}")
+    print(f"  describe: {result['describe']}   rank: {result['rank']}")
+    from kash import completeness
+    print(f"  {completeness.format_report(result['completeness'])}")
     print(f"  backup: {result['backup']}")
     print(f"  pool size: {result['pool_size']}")
     print("\n--- DIGEST ---")
     print(result["digest"])
 
-    if not args.no_telegram and any(result["groups"].values()):
-        print(f"\n[telegram] {push_telegram('Kash daily update' + chr(10) + chr(10) + result['digest'])}")
+    if not args.no_telegram:
+        recipients = testing_recipients(Access(store).allowed_ids(), prefs)
+        outcomes = {}
+        for recipient_id in recipients:
+            actionable = unsent_actionable_listings(store, recipient_id, prefs)
+            if not actionable:
+                continue
+            parts = []
+            onboarding_due = not store.notification_sent(recipient_id, "onboarding")
+            if onboarding_due:
+                parts.append(format_onboarding())
+            parts.append(format_testing_digest(actionable))
+            outcome = push_telegram("\n\n".join(parts), [recipient_id])[recipient_id]
+            outcomes[recipient_id] = outcome
+            if outcome == "sent":
+                if onboarding_due:
+                    store.mark_notification_sent(recipient_id, "onboarding")
+                for listing in actionable:
+                    kind = listing_delivery_kind(listing)
+                    if kind:
+                        store.mark_notification_sent(recipient_id, kind)
+        if outcomes:
+            print(f"\n[telegram] {outcomes}")
+        elif recipients:
+            print("\n[telegram] no unsent actionable listings")
+        else:
+            print("\n[telegram] skipped (no allowed testing recipients)")
 
     from kash import export
-    print(f"  exported {export.to_csv(store, DEFAULT_EXPORT)} rows -> pool_export.csv")
+    print(f"  exported {export.to_csv(store, export_path)} rows -> {os.path.basename(export_path)}")
 
     for n in due:
         schedule.mark(n, state)
-    schedule.save(STATE_PATH, state)
+    schedule.save(state_path, state)
     store.close()
 
 

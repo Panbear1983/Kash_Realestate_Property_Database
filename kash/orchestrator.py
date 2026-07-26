@@ -7,10 +7,12 @@ still finishes and reports.
 from __future__ import annotations
 
 from . import backup
+from . import completeness
 from . import digest as digest_mod
 from . import pipeline
 from . import rank
-from .enrich import enrich, enrich_details
+from .enrich import enrich, enrich_details, extract_descriptions
+from .ledger import Ledger
 
 
 def update(store, prefs: dict, adapters: list) -> dict:
@@ -36,13 +38,25 @@ def update(store, prefs: dict, adapters: list) -> dict:
     except Exception as e:  # noqa: BLE001
         detail_stats = {"error": str(e)}
 
-    # 3b. enrich new rows: coordinates + FEMA flood zone + neighborhood (free, idempotent)
+    # 3b. enrich new rows: coordinates + flood zone + neighbourhood (free, idempotent).
+    # The ledger is threaded through so a failing source is recorded per row rather than
+    # collapsing into an error count, and rows in backoff are skipped.
+    ledger = Ledger(store)
     try:
-        enrich_stats = enrich(store, limit=(prefs.get("enrich") or {}).get("max_per_run", 50))
+        enrich_stats = enrich(store, limit=(prefs.get("enrich") or {}).get("max_per_run", 50),
+                              ledger=ledger)
     except Exception as e:  # noqa: BLE001
         enrich_stats = {"error": str(e)}
 
-    # 4. auto-rank new listings via Codex (tier / priority / thesis)
+    # 3c. read the description semantically into signal_* columns. Must run after
+    # enrich_details (which fills listing_description) and before rank, which consumes it.
+    try:
+        describe_stats = extract_descriptions(
+            store, prefs, limit=(prefs.get("describe") or {}).get("max_per_run", 15))
+    except Exception as e:  # noqa: BLE001
+        describe_stats = {"error": str(e)}
+
+    # 4. auto-rank new listings via the 'rank' ladder (tier / priority / thesis)
     try:
         rank_stats = rank.rank_new(store, prefs, limit=(prefs.get("rank") or {}).get("max_per_run", 15))
     except Exception as e:  # noqa: BLE001
@@ -60,10 +74,13 @@ def update(store, prefs: dict, adapters: list) -> dict:
     return {
         "summaries": summaries,
         "groups": groups,
+        "events": events,
         "digest": digest_mod.format_text(groups),
         "pool_size": store.count(),
         "backup": snap,
         "detail": detail_stats,
+        "describe": describe_stats,
+        "completeness": completeness.audit(store, ledger),
         "enrich": enrich_stats,
         "rank": rank_stats,
     }

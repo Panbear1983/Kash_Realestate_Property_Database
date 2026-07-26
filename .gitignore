@@ -2,8 +2,11 @@
 pool.db
 *.db
 
-# Secrets — never commit API keys
-.env
+# Secrets — never commit API keys.
+# Glob, not just `.env`: backups like .env.bak carry the same live keys and were previously
+# stageable (scripts/set_bot_token.sh writes one on every token rotation).
+.env*
+!.env.example
 
 # Local buyer data and preferences
 preferences.yaml
