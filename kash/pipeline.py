@@ -6,21 +6,38 @@ user-field protection live in Store.upsert().
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from pydantic import ValidationError
 
 from .adapters.base import SourceAdapter
+from . import eligibility
 from .schema import Listing
 from .store import Store
 
 
+def _first_number(value):
+    """First numeric value in provider text — sources emit ranges like '3-4' for beds."""
+    if value is None:
+        return None
+    match = re.search(r"\d+(?:\.\d+)?", str(value))
+    return float(match.group()) if match else None
+
+
 def _in_scope(rec: dict, prefs: dict) -> bool:
-    # keep results within the market's ZIP prefixes (drops off-island bleed)
-    prefixes = prefs.get("zip_prefixes")
     z = rec.get("zip")
-    if prefixes and z and not any(str(z).startswith(p) for p in prefixes):
-        return False
+    # The explicit ZIP allow-list is the buyer's actual target area; zip_prefixes is the
+    # coarser fallback that only drops off-island bleed (the Zillow map bounds overlap NJ).
+    zips = prefs.get("zips")
+    if zips and z:
+        if str(z) not in {str(v) for v in zips}:
+            return False
+    else:
+        prefixes = prefs.get("zip_prefixes")
+        if prefixes and z and not any(str(z).startswith(p) for p in prefixes):
+            return False
+
     band = prefs.get("price") or {}
     price = rec.get("list_price")
     if price is not None:
@@ -28,7 +45,18 @@ def _in_scope(rec: dict, prefs: dict) -> bool:
             return False
         if band.get("max") and price > band["max"]:
             return False
-    return True
+
+    # A range like '3-4' is admitted on its low end, so a 3+ search keeps '3-4' listings.
+    beds_min = prefs.get("beds_min")
+    if beds_min:
+        beds = _first_number(rec.get("beds"))
+        if beds is not None and beds < float(beds_min):
+            return False
+
+    # NOTE: `neighborhoods` is deliberately NOT filtered here. orchestrator.update() runs this
+    # pipeline before enrich's fill_neighborhoods, so the field is still null at ingest and
+    # filtering on it would reject nearly every incoming row.
+    return eligibility.classify(rec, prefs).admit
 
 
 def run(adapter: SourceAdapter, store: Store, prefs: dict) -> dict:

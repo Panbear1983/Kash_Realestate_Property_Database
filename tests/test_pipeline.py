@@ -48,6 +48,11 @@ def test_pipeline():
     seed_csv = os.path.join(tmp, "seed.csv")
     write_seed(seed_csv)
     prefs = preferences.derive_from_csv(seed_csv)
+    # derive_from_csv builds `zips` from the seed, which here is a single ZIP. This test is
+    # about merge behaviour (price drops, status changes, note preservation), not scope policy
+    # — that lives in test_scope_filter.py — so widen the allow-list to cover the ZIPs the mock
+    # adapter returns instead of letting the filter drop them.
+    prefs["zips"] = ["10307", "10308", "10312"]
 
     store = Store(db, finance_cfg=prefs.get("finance"))
     seeded = store.seed_from_csv(seed_csv)
