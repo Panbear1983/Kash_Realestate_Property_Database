@@ -109,9 +109,41 @@ def format_testing_digest(rows: list[dict]) -> str:
                      [format_listing_brief(r) for r in rows])
 
 
-# Telegram rejects anything over 4096 characters. Leave headroom for the header and for the
-# onboarding/digest text that may be prepended to the first message.
-TELEGRAM_LIMIT = 3900
+# Telegram rejects anything over 4096 characters.
+TELEGRAM_HARD_LIMIT = 4096
+TELEGRAM_LIMIT = 3900          # listing chunks, with headroom for the header and part marker
+
+
+def split_text(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
+    """Split arbitrary text on line boundaries so every piece fits.
+
+    Used for the onboarding note and the change digest, which are not lists of listings and so
+    cannot go through chunk_digest. Prepending them to the first listing chunk was a real bug:
+    the chunk respected the limit, the combined message did not, and Telegram rejected the
+    whole thing with "message is too long" — losing that chunk's listings for the run.
+    """
+    if not text:
+        return []
+    if len(text) <= limit:
+        return [text]
+    out, cur = [], []
+    cur_len = 0
+    for line in text.split("\n"):
+        # A single line longer than the limit is hard-split; nothing else can be done with it.
+        while len(line) > limit:
+            if cur:
+                out.append("\n".join(cur))
+                cur, cur_len = [], 0
+            out.append(line[:limit])
+            line = line[limit:]
+        if cur and cur_len + len(line) + 1 > limit:
+            out.append("\n".join(cur))
+            cur, cur_len = [], 0
+        cur.append(line)
+        cur_len += len(line) + 1
+    if cur:
+        out.append("\n".join(cur))
+    return out
 
 
 def chunk_digest(rows: list[dict], limit: int = TELEGRAM_LIMIT) -> list[tuple[str, list[dict]]]:

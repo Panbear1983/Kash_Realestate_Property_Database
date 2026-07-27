@@ -16,11 +16,17 @@ from .ledger import Ledger
 
 
 def update(store, prefs: dict, adapters: list) -> dict:
-    # 1. snapshot the DB before any writes
+    # 1. snapshot the DB before any writes. A failed backup aborts the cycle: the whole point
+    # of the snapshot is that a bad scrape is recoverable, so proceeding without one trades a
+    # recoverable problem for an unrecoverable one.
     try:
         snap = backup.snapshot(getattr(store, "db_path", ""))
     except Exception as e:  # noqa: BLE001
         snap = f"backup failed: {e}"
+    if snap is not None and str(snap).startswith("backup failed"):
+        return {"aborted": snap, "backup": snap, "summaries": [], "groups": {}, "events": [],
+                "digest": "Run aborted before any write: the pre-run backup failed.",
+                "pool_size": store.count()}
 
     start = store.conn.execute("SELECT COALESCE(MAX(id),0) FROM changelog").fetchone()[0]
 

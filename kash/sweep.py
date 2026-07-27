@@ -24,8 +24,20 @@ def bands(prefs: dict) -> list[tuple]:
 
 
 def next_slice(prefs: dict, state: dict) -> tuple:
-    """Return this run's (min, max) price slice and advance the sweep index in `state`."""
+    """Return this run's (min, max) price slice. Pure — does not advance the index.
+
+    Advancing on read meant a run that fetched nothing still consumed its band: if the source
+    failed, that slice of the price range was skipped until the whole rotation came round
+    again. Call advance() after the cycle, only if the source that consumed the band worked.
+    """
+    bs = bands(prefs)
+    idx = int(state.get("sweep_idx", 0)) % len(bs)
+    return bs[idx]
+
+
+def advance(prefs: dict, state: dict) -> int:
+    """Move to the next price band. Call only after a successful fetch."""
     bs = bands(prefs)
     idx = int(state.get("sweep_idx", 0)) % len(bs)
     state["sweep_idx"] = (idx + 1) % len(bs)
-    return bs[idx]
+    return state["sweep_idx"]

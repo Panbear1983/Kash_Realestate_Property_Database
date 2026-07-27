@@ -18,6 +18,8 @@ archive/*.csv
 
 # Update-cycle artifacts
 .last_run.json
+.last_run.json.corrupt
+.run.lock
 backups/
 logs/
 pool_export.csv

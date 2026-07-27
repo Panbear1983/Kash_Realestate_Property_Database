@@ -13,14 +13,17 @@ change digest → optional Telegram push. Per-source cadence lives in preference
 runs weekly, staying inside each provider's free tier.
 """
 import argparse
+import fcntl
 import os
+import sys
+import time
 
 from kash.adapters import REGISTRY
-from kash import orchestrator, preferences, schedule
+from kash import health, orchestrator, preferences, schedule
 from kash.access import Access
 from kash.notifications import (
-    chunk_digest, format_onboarding, listing_delivery_kind, testing_recipients,
-    unsent_actionable_listings,
+    chunk_digest, format_onboarding, listing_delivery_kind, split_text,
+    testing_recipients, unsent_actionable_listings,
 )
 from kash.store import Store
 
@@ -41,6 +44,25 @@ def load_dotenv(path):
         if line and not line.startswith("#") and "=" in line:
             k, v = line.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip().strip("'\""))
+
+
+def acquire_lock(db_path):
+    """Exclusive run lock beside the DB, released when the process exits.
+
+    A cycle now makes ~30 LLM calls and can run for minutes. Two overlapping runs would
+    double-scrape, double-spend Apify credit, and interleave writes to the same rows.
+    Returns the open file handle (which must stay referenced) or None if another run holds it.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(db_path)), ".run.lock")
+    fh = open(path, "w")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return None
+    fh.write(f"{os.getpid()}\n")
+    fh.flush()
+    return fh
 
 
 def auto_sources():
@@ -84,6 +106,12 @@ def main():
     ap.add_argument("--no-telegram", action="store_true")
     args = ap.parse_args()
 
+    started = time.time()
+    lock = acquire_lock(args.db)
+    if lock is None:
+        print("another Kash run is in progress — exiting")
+        return
+
     load_dotenv(DEFAULT_ENV)
     prefs = preferences.ensure(args.prefs, args.csv)
 
@@ -118,7 +146,7 @@ def main():
         return
 
     from kash import sweep
-    lo, hi = sweep.next_slice(prefs, state)   # rotating price band; advances state
+    lo, hi = sweep.next_slice(prefs, state)   # pure read; advanced after a successful fetch
     if lo is not None:
         print(f"sweep slice: ${lo:,}-${hi:,}")
 
@@ -157,30 +185,40 @@ def main():
             if not actionable:
                 continue
             onboarding_due = not store.notification_sent(recipient_id, "onboarding")
-            chunks = chunk_digest(actionable)
-            # The change digest (price drops, went pending, back on market) names exactly the
-            # events worth knowing about and was previously only ever printed to a log.
-            preamble = [p for p in (format_onboarding() if onboarding_due else None,
-                                    result["digest"] if any(result["groups"].values()) else None)
-                        if p]
-            sent_any, failures = 0, []
-            for i, (text, rows_in_chunk) in enumerate(chunks):
-                body = "\n\n".join(preamble + [text]) if i == 0 and preamble else text
-                outcome = push_telegram(body, [recipient_id])[recipient_id]
+            # The preamble goes as its own message(s), never prepended to a listing chunk.
+            # Prepending it meant the chunk respected the limit but the combined message did
+            # not, and Telegram rejected the whole thing — losing that chunk's listings.
+            preamble_parts = []
+            if onboarding_due:
+                preamble_parts += split_text(format_onboarding())
+            if any(result["groups"].values()):
+                preamble_parts += split_text(result["digest"])
+
+            sent_any, failures, total = 0, [], 0
+            for i, text in enumerate(preamble_parts):
+                total += 1
+                if push_telegram(text, [recipient_id])[recipient_id] != "sent":
+                    failures.append("preamble")
+                    continue
+                sent_any += 1
+                if i == 0 and onboarding_due:
+                    store.mark_notification_sent(recipient_id, "onboarding")
+
+            for text, rows_in_chunk in chunk_digest(actionable):
+                total += 1
+                outcome = push_telegram(text, [recipient_id])[recipient_id]
                 if outcome != "sent":
                     # Mark nothing for a chunk that did not arrive, so it is retried next run.
                     failures.append(outcome)
                     continue
                 sent_any += 1
-                if i == 0 and onboarding_due:
-                    store.mark_notification_sent(recipient_id, "onboarding")
                 for listing in rows_in_chunk:
                     kind = listing_delivery_kind(listing)
                     if kind:
                         store.mark_notification_sent(recipient_id, kind)
             outcomes[recipient_id] = (
-                f"sent {sent_any}/{len(chunks)}" if not failures
-                else f"sent {sent_any}/{len(chunks)}, failed: {'; '.join(failures[:2])}")
+                f"sent {sent_any}/{total}" if not failures
+                else f"sent {sent_any}/{total}, failed: {'; '.join(failures[:2])}")
         if outcomes:
             print(f"\n[telegram] {outcomes}")
         elif recipients:
@@ -191,10 +229,42 @@ def main():
     from kash import export
     print(f"  exported {export.to_csv(store, export_path)} rows -> {os.path.basename(export_path)}")
 
+    # Mark only sources that actually worked. Marking unconditionally is how a dead credential
+    # goes quiet: RentCast 403'd, was recorded as having run, and its 7-day cadence then put
+    # the next attempt a week away.
+    by_source = {s.get("source"): s for s in result.get("summaries", [])}
+    ok_sources = []
     for n in due:
-        schedule.mark(n, state)
+        summary = by_source.get(n) or {}
+        if summary.get("error"):
+            fails = schedule.mark_failure(n, state)
+            print(f"  [{n}] NOT marked as run (failure #{fails})")
+        else:
+            schedule.mark(n, state)
+            ok_sources.append(n)
+    # Advance the price band only if a source that consumed it succeeded; otherwise that slice
+    # of the range would be skipped until the rotation came round again.
+    if lo is not None and ok_sources:
+        sweep.advance(prefs, state)
     schedule.save(state_path, state)
+
+    health_report = health.assess(result, due)
+    duration = time.time() - started
+    print(f"\n=== run {health_report['verdict'].upper()} in {duration:.0f}s "
+          f"(pid {os.getpid()}, db {os.path.basename(args.db)}) ===")
+    for p in health_report["problems"]:
+        print(f"  ! {p}")
+
+    # A degraded run must reach the owner even when there are no listings to send — silence
+    # was previously indistinguishable from a healthy quiet day.
+    if health_report["verdict"] != health.OK and not args.no_telegram:
+        recipients = testing_recipients(Access(store).allowed_ids(), prefs)
+        if recipients:
+            push_telegram(health.format_alert(health_report, args.db), recipients)
+
     store.close()
+    if health_report["verdict"] == health.FAILED:
+        sys.exit(1)     # so launchd's LastExitStatus means something
 
 
 if __name__ == "__main__":

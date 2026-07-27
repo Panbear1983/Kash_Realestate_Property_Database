@@ -16,8 +16,8 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kash.notifications import (  # noqa: E402
-    TELEGRAM_LIMIT, chunk_digest, format_listing_brief, listing_delivery_kind,
-    unsent_actionable_listings)
+    TELEGRAM_HARD_LIMIT, TELEGRAM_LIMIT, chunk_digest, format_listing_brief,
+    listing_delivery_kind, split_text, unsent_actionable_listings)
 from kash.store import Store  # noqa: E402
 
 PREFS = {"eligibility": {"telegram_min_baths": 2.5, "store_min_baths": 2,
@@ -185,7 +185,37 @@ def test_a_plain_listing_gets_the_fallback():
 
 
 def test_limit_leaves_headroom_under_telegram_maximum():
-    assert TELEGRAM_LIMIT < 4096
+    assert TELEGRAM_LIMIT < TELEGRAM_HARD_LIMIT
+
+
+# --- preamble splitting (the production failure on 27 July) -----------------------------------
+
+def test_a_long_digest_is_split_rather_than_prepended():
+    """Live failure: the listing chunk respected the limit, but the digest prepended to it
+    pushed the combined message over 4096 and Telegram rejected the whole thing."""
+    digest = "\n".join(f"  - {i} Somewhere Ave @ 7{i:05d}" for i in range(300))
+    parts = split_text(digest)
+    assert len(parts) > 1
+    assert all(len(p) <= TELEGRAM_LIMIT for p in parts)
+
+
+def test_split_text_preserves_every_line():
+    digest = "\n".join(f"line {i}" for i in range(500))
+    assert sum(p.count("line ") for p in split_text(digest)) == 500
+
+
+def test_short_text_is_a_single_part():
+    assert split_text("just a line") == ["just a line"]
+
+
+def test_empty_text_yields_nothing():
+    assert split_text("") == []
+    assert split_text(None) == []
+
+
+def test_a_single_over_long_line_is_hard_split():
+    parts = split_text("x" * 9000)
+    assert len(parts) > 1 and all(len(p) <= TELEGRAM_LIMIT for p in parts)
 
 
 if __name__ == "__main__":
