@@ -1,6 +1,10 @@
-# Generated pool / DB (rebuildable from CSV + sources)
+# Generated pool / DB (rebuildable from CSV + sources).
+# The -wal and -shm sidecars appeared when WAL mode was enabled and hold real row data,
+# so they need ignoring explicitly — `*.db` does not match them.
 pool.db
 *.db
+*.db-wal
+*.db-shm
 
 # Secrets — never commit API keys.
 # Glob, not just `.env`: backups like .env.bak carry the same live keys and were previously
