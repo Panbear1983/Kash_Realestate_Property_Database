@@ -40,7 +40,8 @@ def update(store, prefs: dict, adapters: list) -> dict:
 
     # 3a. Zillow detail scrape: fill deep fields (year built, tax, HOA, agent, description…)
     try:
-        detail_stats = enrich_details(store, limit=(prefs.get("detail") or {}).get("max_per_run", 15))
+        detail_stats = enrich_details(store, limit=(prefs.get("detail") or {}).get("max_per_run", 15),
+                                      prefs=prefs)
     except Exception as e:  # noqa: BLE001
         detail_stats = {"error": str(e)}
 

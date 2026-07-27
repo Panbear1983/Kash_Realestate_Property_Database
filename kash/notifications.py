@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 
 from .dedup import match_key
 from .eligibility import alert_ready
+from .pipeline import _first_number
 from .signals import multigenerational, score_description
 
 
@@ -22,11 +23,40 @@ def testing_recipients(allowed_ids: list[int], prefs: dict) -> list[int]:
     return [int(user_id) for user_id in configured if int(user_id) in allowed]
 
 
+def in_alert_scope(row: dict, prefs: dict) -> bool:
+    """Is this listing still somewhere the buyer is actually shopping?
+
+    `pipeline._in_scope` gates ingestion only, so rows admitted before the ZIP allow-list
+    existed stayed permanently alertable — 8 such rows are in the pool today and 2 were queued
+    to be pushed. Checked at read time rather than by deleting rows: `_in_scope` is a pure
+    function of (row, prefs), so widening `zips` must bring them straight back, and some rows
+    carry human notes.
+
+    Deliberately checks ZIP and beds ONLY, not price. `price.max` and
+    `eligibility.telegram_max_price` are independent knobs — the first decides what is worth
+    storing, the second what is worth interrupting you for — and folding them together here
+    would silently change the alert threshold.
+    """
+    zips = prefs.get("zips")
+    z = row.get("zip")
+    if zips and z and str(z) not in {str(v) for v in zips}:
+        return False
+    beds_min = prefs.get("beds_min")
+    if beds_min:
+        beds = _first_number(row.get("beds"))
+        if beds is not None and beds < float(beds_min):
+            return False
+    return True
+
+
 def actionable_listings(rows: list[dict], prefs: dict) -> list[dict]:
-    """Keep only active, alert-safe listings with a link Telegram can open."""
+    """Keep only active, in-scope, alert-safe listings with a link Telegram can open."""
     return [
         row for row in rows
-        if row.get("status") == "active" and _is_clickable_url(row.get("listing_url")) and alert_ready(row, prefs)
+        if row.get("status") == "active"
+        and _is_clickable_url(row.get("listing_url"))
+        and in_alert_scope(row, prefs)
+        and alert_ready(row, prefs)
     ]
 
 
@@ -66,39 +96,93 @@ def _price_text(value) -> str:
     return f"${value:,.0f}" if isinstance(value, (int, float)) else "price unavailable"
 
 
+ANALYSIS_CHARS = 110
+
+
+def _truncate(text: str, limit: int) -> str:
+    """Cut on a word boundary so a brief never ends mid-word."""
+    text = " ".join((text or "").split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    space = cut.rfind(" ")
+    return (cut[:space] if space > limit * 0.6 else cut).rstrip(" ,.;:—-") + "…"
+
+
+def _highlight(row: dict) -> str:
+    """The one distinguishing feature, if there is one. Empty string if not.
+
+    Deliberately returns nothing rather than a generic sentence: the old fallback
+    ("no extra feature claims, no bullshit") fired on 18 of 18 queued listings and accounted
+    for 40% of the entire message. A shorter brief beats filler.
+    """
+    is_multigen, why = multigenerational(row)
+    signals = score_description(row.get("listing_description"))
+    parts = []
+    if is_multigen:
+        # Always keep the "multigenerational" label. The evidence alone can be ambiguous —
+        # "Live in one, rent the other" does not obviously read as a multigen signal — and this
+        # is the buyer's single most important feature, so it must be unmistakable.
+        if row.get("signal_separate_entrance") or "separate entrance" in signals.reasons:
+            parts.append("multigenerational · separate entrance")
+        elif why:
+            parts.append(f"multigenerational · {_truncate(why, 50)}")
+        else:
+            parts.append("multigenerational")
+    if row.get("signal_second_kitchen") or "second kitchen" in signals.reasons:
+        parts.append("second kitchen")
+    if "in-law suite" in signals.reasons:
+        parts.append("in-law suite")
+    return " · ".join(parts)
+
+
 def format_listing_brief(row: dict) -> str:
-    """Render a short, factual, lightly playful listing note without an LLM."""
+    """Render one listing for Telegram.
+
+    Every line has to earn its place. The previous version spent 52% of the message on text
+    identical across all 18 listings — a "🤖 Robo Kash:" prefix restating the message header,
+    a "Quick take:" label for a line whose position already said so, and a generic fallback
+    sentence. Meanwhile the ranker's per-listing thesis (`analysis`, populated on 18 of 18)
+    never reached the phone at all.
+    """
+    price = _price_text(row.get("list_price"))
+    head = f"{row.get('street_address') or 'Listing'} — {price}"
+    verdict = " · ".join(x for x in (row.get("tier"), row.get("view_priority")) if x)
+    if verdict:
+        head += f"  [{verdict}]"
+
+    # Only populated fields; a missing one is omitted, never rendered as a gap. A live message
+    # showed "4 ba" with no beds because the absent value still produced a separator.
     facts = []
     if row.get("beds") is not None:
         facts.append(f"{row['beds']} bd")
     if row.get("baths") is not None:
         facts.append(f"{row['baths']} ba")
-    details = " · ".join(facts) or "home details pending"
-    # Use the same union rank.py uses, not the raw substring matcher. The keyword path missed
-    # every paraphrased mother/daughter setup, so a home the ranker had flagged TOP PRIORITY
-    # arrived in Telegram saying "no extra feature claims" — which is the entire reason the
-    # description extractor exists.
-    is_multigen, why = multigenerational(row)
-    signals = score_description(row.get("listing_description"))
-    highlights = []
-    if is_multigen:
-        if row.get("signal_separate_entrance") or "separate entrance" in signals.reasons:
-            highlights.append("separate entrance — golden-ticket setup")
-        else:
-            highlights.append(f"multigenerational setup — {why}" if why
-                              else "multigenerational setup")
-    if row.get("signal_second_kitchen") or "second kitchen" in signals.reasons:
-        highlights.append("second kitchen in the listing notes")
-    if "in-law suite" in signals.reasons:
-        highlights.append("in-law suite noted")
-    if not highlights:
-        highlights.append("Robo Kash has the basics on deck; no extra feature claims, no bullshit")
-    return (
-        f"🤖 Robo Kash: {row.get('street_address') or 'Listing'} — {_price_text(row.get('list_price'))}\n"
-        f"{details}\n"
-        f"Quick take: {'; '.join(highlights)}.\n"
-        f"🔗 {row['listing_url']}"
-    )
+    if row.get("sqft"):
+        facts.append(f"{row['sqft']:,} sqft")
+    if row.get("price_per_sqft"):
+        facts.append(f"${row['price_per_sqft']:,}/sqft")
+    if row.get("neighborhood"):
+        facts.append(str(row["neighborhood"]))
+    if row.get("monthly_piti"):
+        facts.append(f"~${row['monthly_piti']:,}/mo")
+    if row.get("days_on_market") is not None:
+        facts.append(f"{row['days_on_market']}d on mkt")
+
+    lines = [f"🤖 {head}"]
+    if facts:
+        lines.append(" · ".join(facts))
+
+    highlight = _highlight(row)
+    analysis = " ".join(str(row.get("analysis") or "").replace("[auto]", "").split())
+    if analysis:
+        lines.append(f"{highlight} — {_truncate(analysis, ANALYSIS_CHARS)}" if highlight
+                     else _truncate(analysis, ANALYSIS_CHARS))
+    elif highlight:
+        lines.append(highlight)
+
+    lines.append(f"🔗 {row['listing_url']}")
+    return "\n".join(lines)
 
 
 def format_testing_digest(rows: list[dict]) -> str:

@@ -26,9 +26,14 @@ PREFS = {"eligibility": {"telegram_min_baths": 2.5, "store_min_baths": 2,
 
 
 def listing(i, **over):
+    # Mirrors a real row: analysis, tier and priority are populated on 18 of 18 live listings,
+    # so a fixture without them produces unrealistically short briefs.
     r = {"street_address": f"{i} Example Street", "zip": "10308", "list_price": 700000,
          "property_type": "sf_detached", "beds": "3", "baths": "2.5", "flood_zone": "X",
          "listing_url": f"https://example.com/{i}", "status": "active",
+         "sqft": 1800, "neighborhood": "Great Kills", "tier": "B", "view_priority": "soon",
+         "analysis": f"RANKED #{i} — solid three-bed in a good school zone, fair price per "
+                     f"square foot and no flood exposure worth worrying about.",
          "listing_description": "Bright kitchen and a private yard."}
     r.update(over)
     return r
@@ -180,8 +185,61 @@ def test_the_keyword_path_still_works_without_extraction():
     assert "separate entrance" in format_listing_brief(row)
 
 
-def test_a_plain_listing_gets_the_fallback():
-    assert "no extra feature claims" in format_listing_brief(listing(1))
+def test_no_generic_fallback_line_exists():
+    """It fired on 18 of 18 queued listings and was 40% of the whole message."""
+    text = format_listing_brief(listing(1))
+    assert "no extra feature claims" not in text
+    assert "no bullshit" not in text
+
+
+def test_no_boilerplate_prefixes():
+    """'Robo Kash:' restates the message header; 'Quick take:' labels the obvious."""
+    text = format_listing_brief(listing(1, analysis="RANKED #3 — worth a look."))
+    assert "Robo Kash:" not in text
+    assert "Quick take:" not in text
+
+
+def test_the_verdict_appears_in_the_headline():
+    text = format_listing_brief(listing(1, tier="A", view_priority="now"))
+    assert "[A · now]" in text
+
+
+def test_the_analysis_reaches_the_message():
+    text = format_listing_brief(listing(1, analysis="RANKED #1 — CALL AGENT TODAY."))
+    assert "CALL AGENT TODAY" in text
+
+
+def test_the_auto_prefix_is_stripped():
+    assert "[auto]" not in format_listing_brief(listing(1, analysis="[auto] Solid buy."))
+
+
+def test_a_long_analysis_is_cut_on_a_word_boundary():
+    text = format_listing_brief(listing(1, analysis="word " * 200))
+    body = [ln for ln in text.split("\n") if ln.startswith("word")][0]
+    assert body.endswith("…") and not body.endswith("wor…")
+
+
+def test_absent_facts_are_omitted_not_rendered_as_gaps():
+    """A live message showed '4 ba' with no beds because the gap still emitted a separator."""
+    text = format_listing_brief(listing(1, beds=None, sqft=None, monthly_piti=None))
+    assert "None" not in text
+    assert " ·  · " not in text
+
+
+def test_a_listing_with_nothing_extra_is_just_three_lines():
+    text = format_listing_brief(listing(1, analysis=None))
+    assert len(text.split("\n")) == 3
+
+
+def test_briefs_do_not_repeat_across_a_batch():
+    """The check that would have caught the original problem."""
+    import collections
+    rows = [listing(i, analysis=f"RANKED #{i} — reason {i}.", list_price=700000 + i * 1000,
+                    sqft=1500 + i * 10) for i in range(12)]
+    lines = collections.Counter(
+        ln for r in rows for ln in format_listing_brief(r).split("\n"))
+    worst = max(lines.values())
+    assert worst <= len(rows) // 3, f"a line repeats {worst} times across {len(rows)} listings"
 
 
 def test_limit_leaves_headroom_under_telegram_maximum():

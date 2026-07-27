@@ -108,7 +108,8 @@ def main():
         results["enrich"] = enrich(store, limit=args.limit, ledger=ledger)
     if "detail" in wanted:
         results["detail"] = enrich_details(
-            store, limit=args.limit or (prefs.get("detail") or {}).get("max_per_run", 15))
+            store, limit=args.limit or (prefs.get("detail") or {}).get("max_per_run", 15),
+            prefs=prefs)
     if "describe" in wanted:
         results["describe"] = extract_descriptions(
             store, prefs,

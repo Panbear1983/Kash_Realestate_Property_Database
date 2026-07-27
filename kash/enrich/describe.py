@@ -61,15 +61,25 @@ def _prompt(description: str) -> str:
     )
 
 
-def _needs_extract(row: dict) -> bool:
-    return bool(row.get("listing_description")) and not row.get("signal_extracted_at")
+def _needs_extract(row: dict, prefs: Optional[dict] = None) -> bool:
+    """Worth spending an LLM call on? Out-of-scope rows are not.
+
+    The pool holds rows admitted before the ZIP allow-list existed. Extracting their
+    descriptions burns subscription quota on homes the buyer's own filter rejects.
+    """
+    if not row.get("listing_description") or row.get("signal_extracted_at"):
+        return False
+    if prefs:
+        from ..notifications import in_alert_scope
+        return in_alert_scope(row, prefs)
+    return True
 
 
 def extract_descriptions(store, prefs: dict, limit: int = 15, backend=None) -> dict:
     """Fill signal_* columns for rows that have a description but no extraction yet."""
     from .. import llm
 
-    rows = [r for r in store.all() if _needs_extract(r)]
+    rows = [r for r in store.all() if _needs_extract(r, prefs)]
     if not rows:
         return {"extracted": 0, "candidates": 0}
 

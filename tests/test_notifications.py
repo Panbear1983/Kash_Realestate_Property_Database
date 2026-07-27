@@ -101,10 +101,14 @@ def test_listing_brief_is_deterministic_factual_and_lighthearted():
     assert format_listing_brief(_listing()) == format_listing_brief(_listing())
 
 
-def test_listing_brief_uses_robo_kash_and_occasional_non_targeted_street_tone():
+def test_listing_brief_carries_no_boilerplate():
+    """Replaces an earlier test that REQUIRED the 'Robo Kash' prefix and the 'no bullshit'
+    sign-off. Measured on the live queue, those plus the generic fallback were 52% of the
+    entire message and identical on all 18 listings, so the requirement was withdrawn."""
     brief = format_listing_brief(_listing())
-    assert "Robo Kash" in brief
-    assert "no bullshit" in brief.lower()
+    assert "Robo Kash:" not in brief
+    assert "no bullshit" not in brief.lower()
+    assert "Quick take:" not in brief
 
 
 def test_telegram_sender_targets_each_allowed_recipient_without_live_request():
@@ -128,14 +132,11 @@ def test_telegram_sender_targets_each_allowed_recipient_without_live_request():
 
 
 if __name__ == "__main__":
-    test_allowed_recipients_excludes_pending_and_denied_accounts()
-    test_explicit_testing_recipient_list_is_limited_to_allowed_accounts()
-    test_onboarding_delivery_state_is_per_recipient()
-    test_delayed_flood_enrichment_can_alert_once_when_listing_becomes_safe()
-    test_actionable_listings_need_alert_policy_and_clickable_link()
-    test_actionable_listings_require_absolute_https_link()
-    test_testing_digest_contains_a_clickable_link_and_onboarding_is_plain_language()
-    test_listing_brief_is_deterministic_factual_and_lighthearted()
-    test_listing_brief_uses_robo_kash_and_occasional_non_targeted_street_tone()
-    test_telegram_sender_targets_each_allowed_recipient_without_live_request()
-    print("PASS — Telegram delivery selects allowed humans and actionable linked listings")
+    # Discover tests rather than listing them: the hardcoded list silently went stale the
+    # moment a test was renamed, and a NameError is a worse failure than a missed test.
+    tests = [v for k, v in sorted(globals().items())
+             if k.startswith("test_") and callable(v)]
+    for fn in tests:
+        fn()
+        print(f"  ok  {fn.__name__}")
+    print(f"{len(tests)} passed — Telegram delivery selects allowed humans and linked listings")

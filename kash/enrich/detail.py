@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+from typing import Optional
 from urllib.parse import urlparse
 
 import requests
@@ -31,32 +32,61 @@ def _zpid(url: str):
     return m.group(1) if m else None
 
 
-def _needs_detail(r: dict) -> bool:
-    # any Zillow homedetails link (has a zpid) not yet detailed (year_built as sentinel)
+def _slug(url: str) -> str:
+    """The address portion of a Zillow URL, normalised for matching.
+
+    Both URL shapes carry it:
+        /homes/109-Cardiff-St-Staten-Island-NY-10312/
+        /homedetails/45-Fairlawn-Loop-Staten-Island-NY-10308/32346621_zpid/
+    """
+    m = re.search(r"/home(?:s|details)/([^/]+)/", url or "")
+    return re.sub(r"[^a-z0-9]", "", m.group(1).lower()) if m else ""
+
+
+def _needs_detail(r: dict, prefs: Optional[dict] = None) -> bool:
+    """Any Zillow listing not yet detailed (year_built as the sentinel).
+
+    Previously this required a zpid, which excluded every `/homes/<address>/` URL — 33 of the
+    35 hand-curated rows and 15 of the 18 currently queued for alerting. Those are exactly the
+    buyer's shortlist, so the richest listings in the pool were the only ones that could never
+    have their description, taxes or year built filled in. The Apify detail actor resolves
+    address URLs perfectly well; only our filter was refusing them.
+    """
     u = r.get("listing_url") or ""
     parsed = urlparse(u)
     host = (parsed.hostname or "").lower()
     is_zillow = host == "zillow.com" or host.endswith(".zillow.com")
-    return bool(parsed.scheme == "https" and is_zillow and _zpid(u) and not r.get("year_built"))
+    if not (parsed.scheme == "https" and is_zillow and _slug(u) and not r.get("year_built")):
+        return False
+    if prefs:
+        from ..notifications import in_alert_scope
+        return in_alert_scope(r, prefs)   # don't spend Apify credit on out-of-scope rows
+    return True
 
 
-def enrich_details(store, limit: int = 15) -> dict:
+def enrich_details(store, limit: int = 15, prefs: Optional[dict] = None) -> dict:
     token = os.environ.get("APIFY_TOKEN")
     if not token:
         return {"detailed": 0, "skipped": "no APIFY_TOKEN"}
-    rows = [r for r in store.all() if _needs_detail(r)]
+    rows = [r for r in store.all() if _needs_detail(r, prefs)]
     if limit:
         rows = rows[:limit]
     if not rows:
         return {"detailed": 0, "candidates": 0}
 
-    zmap = {}
+    # Match returned items back by zpid where we have one, and by address slug otherwise —
+    # a row sent as /homes/<address>/ has no zpid to match on until the actor tells us one.
+    zmap, smap = {}, {}
     start = []
     for r in rows:
-        z = _zpid(r.get("listing_url"))
+        url = r.get("listing_url") or ""
+        key = match_key(r)
+        z = _zpid(url)
         if z:
-            zmap[z] = match_key(r)
-        start.append({"url": r["listing_url"]})
+            zmap[z] = key
+        if _slug(url):
+            smap[_slug(url)] = key
+        start.append({"url": url})
 
     try:
         resp = requests.post(
@@ -72,11 +102,16 @@ def enrich_details(store, limit: int = 15) -> dict:
     for it in items:
         if not isinstance(it, dict) or "error" in it:
             continue
-        z = str(it.get("zpid") or "") or _zpid(it.get("url") or it.get("hdpUrl") or "")
-        key = zmap.get(z)
+        returned_url = it.get("url") or it.get("hdpUrl") or ""
+        z = str(it.get("zpid") or "") or _zpid(returned_url)
+        key = zmap.get(z) or smap.get(_slug(returned_url))
         if not key:
             continue
         upd = {k: v for k, v in _normalize(it).items() if v not in (None, "")}
+        # Upgrade an address URL to the canonical homedetails one so later runs match by zpid
+        # directly, and so the link in Telegram points at the real listing page.
+        if z and returned_url and _zpid(returned_url):
+            upd["listing_url"] = returned_url
         if upd:
             store.update_fields(key, upd)
             n += 1
