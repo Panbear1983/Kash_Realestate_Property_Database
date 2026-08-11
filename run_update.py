@@ -22,7 +22,7 @@ from kash.adapters import REGISTRY
 from kash import health, orchestrator, preferences, schedule
 from kash.access import Access
 from kash.notifications import (
-    chunk_digest, format_onboarding, listing_delivery_kind, split_text,
+    chunk_digest, format_onboarding, health_recipients, listing_delivery_kind, split_text,
     testing_recipients, unsent_actionable_listings,
 )
 from kash.store import Store
@@ -255,12 +255,20 @@ def main():
     for p in health_report["problems"]:
         print(f"  ! {p}")
 
-    # A degraded run must reach the owner even when there are no listings to send — silence
-    # was previously indistinguishable from a healthy quiet day.
-    if health_report["verdict"] != health.OK and not args.no_telegram:
-        recipients = testing_recipients(Access(store).allowed_ids(), prefs)
+    # A degraded run must reach the owner — but only ONCE per problem. The unconditional
+    # nightly alert re-sent the same message every run (ten identical RentCast alerts);
+    # alert_delta remembers what was already reported and sends new/resolved/weekly-reminder
+    # changes only. Runs on OK verdicts too, so recovery produces a "Resolved:" notice.
+    alert_text = health.alert_delta(health_report, state)
+    schedule.save(state_path, state)          # persist the alert memory
+    if alert_text:
+        print(f"\n[health alert delta]\n{alert_text}")
+    else:
+        print("\n[health alert delta] none (nothing new to report)")
+    if alert_text and not args.no_telegram:
+        recipients = health_recipients(Access(store).allowed_ids(), prefs)
         if recipients:
-            push_telegram(health.format_alert(health_report, args.db), recipients)
+            push_telegram(alert_text, recipients)
 
     store.close()
     if health_report["verdict"] == health.FAILED:

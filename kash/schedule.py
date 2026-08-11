@@ -50,16 +50,33 @@ def save(path: str, state: dict) -> None:
     os.replace(tmp, path)
 
 
+def _days_since(stamp: str | None) -> int | None:
+    if not stamp:
+        return None
+    try:
+        return (date.today() - datetime.strptime(stamp, "%Y-%m-%d").date()).days
+    except ValueError:
+        return None
+
+
 def due(name: str, cfg: dict, state: dict) -> bool:
     every = int((cfg or {}).get("every_days", 1))
-    last = state.get(name)
-    if not last:
+
+    # A failing source retries with backoff, not daily. Keeping it due every day is what
+    # burned RentCast's 50-call monthly quota: one transient outage put the source into
+    # daily 6-call retries, exhausting the quota, whose 403s then kept the retries coming.
+    # Wait 1d, 2d, 4d… after consecutive failures, capped at the source's own cadence.
+    fails = failure_count(name, state)
+    if fails:
+        since_attempt = _days_since((state.get("last_failure") or {}).get(name))
+        if since_attempt is not None:
+            wait = min(2 ** (fails - 1), max(every, 1))
+            return since_attempt >= wait
+
+    since_success = _days_since(state.get(name))
+    if since_success is None:
         return True
-    try:
-        last_d = datetime.strptime(last, "%Y-%m-%d").date()
-    except ValueError:
-        return True
-    return (date.today() - last_d).days >= every
+    return since_success >= every
 
 
 def which_due(names: list[str], prefs: dict, state: dict) -> list[str]:
@@ -75,14 +92,19 @@ def mark(name: str, state: dict) -> None:
     week away — a broken key backing off into silence rather than being retried.
     """
     state[name] = date.today().isoformat()
-    fails = state.setdefault("consecutive_failures", {})
-    fails.pop(name, None)
+    state.setdefault("consecutive_failures", {}).pop(name, None)
+    state.setdefault("last_failure", {}).pop(name, None)
 
 
 def mark_failure(name: str, state: dict) -> int:
-    """Record a failed run and return how many times this source has failed in a row."""
+    """Record a failed run and return how many times this source has failed in a row.
+
+    Also stamps the attempt date — the backoff in due() is measured from the last failed
+    attempt, not from the last success.
+    """
     fails = state.setdefault("consecutive_failures", {})
     fails[name] = int(fails.get(name, 0)) + 1
+    state.setdefault("last_failure", {})[name] = date.today().isoformat()
     return fails[name]
 
 

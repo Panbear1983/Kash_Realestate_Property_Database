@@ -27,6 +27,10 @@ eligibility:
   telegram_max_price: 800000
   safe_flood_zones: [X]
 telegram_recipient_ids: [7512954760, 5143942438]
+# Operational failure alerts (run health) go only to these owners — without this key nobody
+# is alerted when a run degrades. Alerts fire on CHANGES only: new problems, resolutions,
+# and a weekly still-broken reminder; the full verdict is in logs/update.log every run.
+telegram_health_recipient_ids: [7512954760]
 fetch_limit: 100
 finance:
   rate: 0.063
@@ -85,6 +89,10 @@ sources:
   zillow:
     every_days: 1
     results_limit: 40
+  # RentCast's free tier allows 50 API calls/month and one run costs 6 (one per ZIP), so the
+  # weekly cadence uses ~24-30/month. Failed runs retry with backoff (1d/2d/4d, capped at
+  # every_days) precisely so a transient outage cannot burn the quota with daily retries.
+  # Usage and the billing-cycle reset date: app.rentcast.io (API dashboard).
   rentcast:
     every_days: 7
 sweep:

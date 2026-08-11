@@ -13,6 +13,9 @@ line that says plainly what happened.
 """
 from __future__ import annotations
 
+import re
+from datetime import date
+
 OK = "ok"
 DEGRADED = "degraded"
 FAILED = "failed"
@@ -68,6 +71,88 @@ def assess(result: dict, due_sources: list[str] | None = None) -> dict:
         problems.append(f"{comp['alert_blocked']} listings blocked from alerting")
 
     return {"verdict": DEGRADED if problems else OK, "problems": problems}
+
+
+def signature(problem: str) -> str:
+    """A stable identity for a problem, so tonight's copy matches last night's.
+
+    Volatile fragments are normalized away: full URLs (query strings differ per run) and
+    counts ("failed on 28 of 28" vs "27 of 28"). Three-digit numbers survive because HTTP
+    status codes are the load-bearing part of most problems — 403 and 400 are different
+    problems, 28-vs-27 rows is the same one.
+    """
+    sig = re.sub(r"for url: \S+", "for url: <url>", problem or "")
+    sig = re.sub(r"\b\d{4,}\b", "N", sig)
+    sig = re.sub(r"\b\d{1,2}\b", "N", sig)
+    return " ".join(sig.split())
+
+
+def alert_delta(report: dict, state: dict, remind_days: int = 7,
+                today: str | None = None) -> str | None:
+    """What is worth sending to a human tonight, given what they were already told.
+
+    The unconditional nightly alert did its job — failures stopped being silent — but with
+    no memory it re-sent the identical message every run: RentCast alone produced ten copies.
+    This mutates ``state["health_alerts"]`` (persisted in the run-state file by the caller)
+    and returns a message only when something CHANGED: a new problem appeared, a previously
+    reported one resolved, or a known one has been broken for `remind_days` without a nudge.
+    The full verdict still goes to the log every run — this gates only the phone.
+    """
+    today = today or date.today().isoformat()
+    mem = state.setdefault("health_alerts", {})
+
+    current: dict[str, str] = {}
+    for p in report.get("problems", []):
+        current.setdefault(signature(p), p)
+
+    new = [text for sig, text in current.items() if sig not in mem]
+    resolved = [entry.get("text", sig) for sig, entry in mem.items() if sig not in current]
+    reminders = []
+    for sig, text in current.items():
+        entry = mem.get(sig)
+        if entry and _days_between(entry.get("last_alerted"), today) >= remind_days:
+            reminders.append((text, entry.get("first", today)))
+
+    # Update the memory to reflect what the owner will now have been told.
+    for sig in [s for s in mem if s not in current]:
+        del mem[sig]
+    for sig, text in current.items():
+        if sig not in mem:
+            mem[sig] = {"first": today, "last_alerted": today, "text": text}
+        elif any(text == t for t, _ in reminders):
+            mem[sig]["last_alerted"] = today
+            mem[sig]["text"] = text
+
+    if not (new or resolved or reminders):
+        return None
+    head = ("Kash run FAILED — no listings were collected."
+            if report.get("verdict") == FAILED and new else "Kash health update.")
+    lines = [head]
+    if new:
+        lines.append("New:")
+        lines += [f"  - {t[:160]}" for t in new[:6]]
+    if resolved:
+        lines.append("Resolved:")
+        lines += [f"  - {t[:120]}" for t in resolved[:6]]
+    if reminders:
+        lines.append("Still broken:")
+        lines += [f"  - since {first}: {t[:140]}" for t, first in reminders[:6]]
+    lines.append("Check logs/update.log.")
+    return "\n".join(lines)
+
+
+def _days_between(earlier: str | None, later: str) -> int:
+    from datetime import date as _d
+    try:
+        a = _d.fromisoformat(earlier or "")
+        b = _d.fromisoformat(later)
+        return (b - a).days
+    except ValueError:
+        return remind_default() + 1   # unreadable stamp: err on the side of re-alerting
+
+
+def remind_default() -> int:
+    return 7
 
 
 def format_alert(health: dict, db_path: str = "") -> str:

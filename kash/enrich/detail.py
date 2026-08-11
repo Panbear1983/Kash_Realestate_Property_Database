@@ -44,13 +44,16 @@ def _slug(url: str) -> str:
 
 
 def _needs_detail(r: dict, prefs: Optional[dict] = None) -> bool:
-    """Any Zillow listing not yet detailed (year_built as the sentinel).
+    """Any Zillow listing that still wants its deep fields (year_built as the sentinel).
 
-    Previously this required a zpid, which excluded every `/homes/<address>/` URL — 33 of the
-    35 hand-curated rows and 15 of the 18 currently queued for alerting. Those are exactly the
-    buyer's shortlist, so the richest listings in the pool were the only ones that could never
-    have their description, taxes or year built filled in. The Apify detail actor resolves
-    address URLs perfectly well; only our filter was refusing them.
+    Eligibility is by address slug, but note the batch builder below sends ONLY zpid URLs to
+    the actor. An earlier version of this docstring claimed the Apify detail actor resolves
+    `/homes/<address>/` URLs; its own run log says otherwise — `ERROR Invalid URL … Unknown
+    URL format` for every address-style URL, then `No Zillow details to scrape`. Because
+    nothing got filled, the identical batch of address rows was retried every night. Address
+    rows stay *eligible* here because their URL upgrades organically: the nightly search
+    scrape re-encounters them and upsert refreshes `listing_url` (a machine field) to the
+    canonical `/homedetails/…_zpid/` form, at which point they become sendable.
     """
     u = r.get("listing_url") or ""
     parsed = urlparse(u)
@@ -64,26 +67,44 @@ def _needs_detail(r: dict, prefs: Optional[dict] = None) -> bool:
     return True
 
 
-def enrich_details(store, limit: int = 15, prefs: Optional[dict] = None) -> dict:
+# The ledger tracks detail outcomes under this field: it is the detail scrape's most
+# consequential output (it feeds description extraction and the Telegram brief).
+LEDGER_FIELD = "listing_description"
+
+
+def enrich_details(store, limit: int = 15, prefs: Optional[dict] = None,
+                   ledger=None) -> dict:
     token = os.environ.get("APIFY_TOKEN")
     if not token:
         return {"detailed": 0, "skipped": "no APIFY_TOKEN"}
-    rows = [r for r in store.all() if _needs_detail(r, prefs)]
-    if limit:
-        rows = rows[:limit]
-    if not rows:
-        return {"detailed": 0, "candidates": 0}
+    from ..ledger import Ledger
+    lg = ledger or Ledger(store)
 
-    # Match returned items back by zpid where we have one, and by address slug otherwise —
-    # a row sent as /homes/<address>/ has no zpid to match on until the actor tells us one.
+    eligible = [r for r in store.all() if _needs_detail(r, prefs)]
+    # The actor accepts only zpid URLs. Address-only rows are counted, never sent — one of
+    # them in the batch produces "Invalid URL"; a batch of them fails the whole run.
+    sendable, waiting_on_url = [], 0
+    for r in eligible:
+        if not _zpid(r.get("listing_url") or ""):
+            waiting_on_url += 1
+        elif lg.is_due(match_key(r), LEDGER_FIELD):
+            sendable.append(r)
+    # Fresh rows first: order by prior attempt count so a row that keeps failing sinks to the
+    # back of the queue instead of pinning the batch night after night.
+    def _attempts(r):
+        e = lg.entry(match_key(r), LEDGER_FIELD)
+        return int(e["attempts"]) if e else 0
+    sendable.sort(key=_attempts)
+    rows = sendable[:limit] if limit else sendable
+    if not rows:
+        return {"detailed": 0, "candidates": 0, "awaiting_zpid_url": waiting_on_url}
+
     zmap, smap = {}, {}
     start = []
     for r in rows:
         url = r.get("listing_url") or ""
         key = match_key(r)
-        z = _zpid(url)
-        if z:
-            zmap[z] = key
+        zmap[_zpid(url)] = key
         if _slug(url):
             smap[_slug(url)] = key
         start.append({"url": url})
@@ -96,9 +117,14 @@ def enrich_details(store, limit: int = 15, prefs: Optional[dict] = None) -> dict
         resp.raise_for_status()
         items = resp.json() or []
     except Exception as e:  # noqa: BLE001
+        # Ledger every batched row so a systemic failure backs off per-row instead of the
+        # identical batch retrying every night.
+        for key in {k for k in zmap.values()}:
+            lg.record_failure(key, LEDGER_FIELD, f"detail run failed: {e}")
         return {"detailed": 0, "error": str(e)}
 
     n = 0
+    updated = set()
     for it in items:
         if not isinstance(it, dict) or "error" in it:
             continue
@@ -114,8 +140,14 @@ def enrich_details(store, limit: int = 15, prefs: Optional[dict] = None) -> dict
             upd["listing_url"] = returned_url
         if upd:
             store.update_fields(key, upd)
+            lg.record_success(key, LEDGER_FIELD)
+            updated.add(key)
             n += 1
-    return {"detailed": n, "candidates": len(rows)}
+    # Batched rows that came back with nothing usable: record it, so they queue behind
+    # fresh rows next time rather than re-occupying the same batch slots.
+    for key in set(zmap.values()) - updated:
+        lg.record_failure(key, LEDGER_FIELD, "actor returned no usable data for this row")
+    return {"detailed": n, "candidates": len(rows), "awaiting_zpid_url": waiting_on_url}
 
 
 def _price_history(ph):

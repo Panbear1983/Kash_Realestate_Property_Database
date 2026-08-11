@@ -23,6 +23,13 @@ def testing_recipients(allowed_ids: list[int], prefs: dict) -> list[int]:
     return [int(user_id) for user_id in configured if int(user_id) in allowed]
 
 
+def health_recipients(allowed_ids: list[int], prefs: dict) -> list[int]:
+    """Operational failure alerts go only to explicitly configured owners."""
+    configured = prefs.get("telegram_health_recipient_ids") or []
+    allowed = set(allowed_ids)
+    return [int(user_id) for user_id in configured if int(user_id) in allowed]
+
+
 def in_alert_scope(row: dict, prefs: dict) -> bool:
     """Is this listing still somewhere the buyer is actually shopping?
 
