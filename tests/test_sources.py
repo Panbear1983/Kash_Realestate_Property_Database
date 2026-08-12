@@ -36,7 +36,49 @@ def test_manual_source_selection_rejects_unsupported_provider_names():
         raise AssertionError("unsupported source must be rejected before scheduling")
 
 
+# --- the Zillow search URL carries the buyer's filters -------------------------------------
+# resultsLimit caps the run BEFORE our scope filter sees anything, so every filter missing
+# from the query wastes result slots on listings the pipeline discards (measured: 35-78%).
+
+def _decoded_filter_state(**kwargs):
+    import json
+    import urllib.parse
+    from kash.adapters.zillow_scraper import SI_BOUNDS, _search_url
+    url = _search_url("Staten Island, NY", SI_BOUNDS, **kwargs)
+    q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["searchQueryState"][0]
+    return json.loads(q)["filterState"]
+
+
+def test_search_url_carries_beds_baths_and_price():
+    fs = _decoded_filter_state(price={"min": 560915, "max": 640915},
+                               beds_min=3, baths_min=2)
+    assert fs["beds"] == {"min": 3}
+    assert fs["baths"] == {"min": 2}, "whole-number baths must not serialize as 2.0"
+    assert fs["price"] == {"min": 560915, "max": 640915}
+    assert fs["sortSelection"] == {"value": "days"}
+
+
+def test_search_url_excludes_the_rejected_property_types():
+    fs = _decoded_filter_state(excluded_types=["condo", "apartment", "lot"])
+    for key in ("isCondo", "isApartment", "isApartmentOrCondo", "isLotLand"):
+        assert fs[key] == {"value": False}, key
+
+
+def test_unknown_excluded_type_is_ignored_not_fatal():
+    fs = _decoded_filter_state(excluded_types=["houseboat"])
+    assert "houseboat" not in str(fs)
+
+
+def test_bare_search_url_is_unchanged():
+    fs = _decoded_filter_state()
+    assert set(fs) == {"sortSelection"}, "no prefs -> no filters, as before"
+
+
 if __name__ == "__main__":
     test_derived_sources_are_implemented_adapters()
     test_manual_source_selection_rejects_unsupported_provider_names()
-    print("PASS — derived source configuration matches implemented adapters")
+    test_search_url_carries_beds_baths_and_price()
+    test_search_url_excludes_the_rejected_property_types()
+    test_unknown_excluded_type_is_ignored_not_fatal()
+    test_bare_search_url_is_unchanged()
+    print("PASS — source config + Zillow query filters")

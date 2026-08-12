@@ -55,7 +55,20 @@ _STATUS = {
 SI_BOUNDS = {"north": 40.651, "south": 40.477, "east": -74.052, "west": -74.259}
 
 
-def _search_url(term: str, bounds: dict, price: dict | None = None) -> str:
+# excluded_property_types (preferences) -> Zillow filterState toggles. Filtering in the
+# query matters because resultsLimit caps the run at N results BEFORE our scope filter
+# runs: with no type/beds filter, 35-78% of the 40 slots went to listings the pipeline
+# immediately discarded, and the newest in-scope listings fell outside the window.
+_EXCLUDE_FILTERS = {
+    "condo": ("isCondo", "isApartmentOrCondo"),
+    "apartment": ("isApartment", "isApartmentOrCondo"),
+    "lot": ("isLotLand",),
+    "manufactured": ("isManufactured",),
+}
+
+
+def _search_url(term: str, bounds: dict, price: dict | None = None,
+                beds_min=None, baths_min=None, excluded_types=()) -> str:
     """A Zillow for-sale search URL with map bounds (+ optional price slice for the
     rotating sweep), carrying the required ?searchQueryState= parameter."""
     filter_state = {"sortSelection": {"value": "days"}}
@@ -66,6 +79,15 @@ def _search_url(term: str, bounds: dict, price: dict | None = None) -> str:
         if price.get("max"):
             pf["max"] = int(price["max"])
         filter_state["price"] = pf
+    if beds_min:
+        filter_state["beds"] = {"min": int(beds_min)}
+    if baths_min:
+        # Zillow accepts fractional bath minimums; keep whole numbers as ints.
+        b = float(baths_min)
+        filter_state["baths"] = {"min": int(b) if b == int(b) else b}
+    for t in excluded_types:
+        for key in _EXCLUDE_FILTERS.get(str(t).lower(), ()):
+            filter_state[key] = {"value": False}
     sqs = {
         "usersSearchTerm": term,
         "mapBounds": bounds,
@@ -97,8 +119,15 @@ class ZillowScraperAdapter(SourceAdapter):
         price = None
         if self.config.get("price_min") or self.config.get("price_max"):
             price = {"min": self.config.get("price_min"), "max": self.config.get("price_max")}
+        eligibility = preferences.get("eligibility") or {}
+        url = _search_url(
+            term, bounds, price,
+            beds_min=preferences.get("beds_min"),
+            baths_min=eligibility.get("store_min_baths"),
+            excluded_types=eligibility.get("excluded_property_types") or (),
+        )
         payload = {
-            "searchUrls": [{"url": _search_url(term, bounds, price)}],
+            "searchUrls": [{"url": url}],
             "extractionMethod": "PAGINATION_WITH_ZOOM_IN",
             "resultsLimit": results_limit,
         }
