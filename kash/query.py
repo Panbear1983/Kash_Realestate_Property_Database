@@ -47,7 +47,11 @@ def build(filters, sort: Optional[str], order: str, limit: int):
         if sort not in _FIELDS:
             raise ValueError(f"unknown sort field: {sort}")
         direction = "DESC" if str(order).lower().startswith("d") else "ASC"
-        sql += f' ORDER BY "{sort}" {direction}'
+        # Empty values sort LAST, in both directions. SQLite puts NULLs first by default,
+        # which combined with LIMIT hid the pool's curated rows completely: sort='rank' with
+        # 219 unranked rows and LIMIT 100 returned 100 NULL-rank rows and not one of the
+        # 35 ranked ones — the dashboard's default view could not show them at all.
+        sql += f' ORDER BY "{sort}" IS NULL, "{sort}" {direction}'
     sql += f" LIMIT {int(limit)}"
     return sql, params
 
