@@ -80,7 +80,10 @@ Word-table format.
 # Exercise the complete merge pipeline with fixture provider records
 python run_fetch.py --source mock
 
-# Launch the visual dashboard
+# Launch the visual dashboard (wrapper: works from any directory, checks the
+# python/textual install, fixes locale/TERM for Textual rendering)
+./dashboard.sh
+# equivalent, without the preflight:
 python dashboard.py
 
 # Launch the command shell
