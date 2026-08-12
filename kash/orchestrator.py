@@ -12,6 +12,7 @@ from . import digest as digest_mod
 from . import lifecycle
 from . import pipeline
 from . import rank
+from . import schools
 from .enrich import enrich, enrich_details, extract_descriptions
 from .ledger import Ledger
 
@@ -65,6 +66,14 @@ def update(store, prefs: dict, adapters: list) -> dict:
     except Exception as e:  # noqa: BLE001
         enrich_stats = {"error": str(e)}
 
+    # 3b-ii. zoned elementary school from frozen DOE polygons. Offline and free, so it runs
+    # every cycle; needs the coordinates enrich() just filled, and only ever fills blanks.
+    try:
+        school_stats = schools.fill_school_zones(
+            store, limit=(prefs.get("schools") or {}).get("max_per_run", 200))
+    except Exception as e:  # noqa: BLE001
+        school_stats = {"error": str(e)}
+
     # 3c. read the description semantically into signal_* columns. Must run after
     # enrich_details (which fills listing_description) and before rank, which consumes it.
     try:
@@ -96,6 +105,7 @@ def update(store, prefs: dict, adapters: list) -> dict:
         "pool_size": store.count(),
         "backup": snap,
         "lifecycle": lifecycle_stats,
+        "schools": school_stats,
         "detail": detail_stats,
         "describe": describe_stats,
         "completeness": completeness.audit(store, ledger),

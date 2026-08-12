@@ -114,3 +114,9 @@ detail:
   max_per_run: 15
 describe:
   max_per_run: 15        # LLM description signals per run; idempotent, one call per new row
+schools:
+  # Zoned elementary school from frozen NYC DOE polygons (kash/data/si_school_zones.json).
+  # Offline and free, so the cap is only there to bound one run's writes; blanks are filled,
+  # hand-entered names are never overwritten. Rebuild the asset each school year with
+  # scripts/build_school_zones.py.
+  max_per_run: 200

@@ -168,8 +168,9 @@ def main():
         else:
             print(f"  [{s['source']}] fetched {s['fetched']}  +{s['inserted']} new  "
                   f"~{s['updated']} updated  ({s['out_of_scope']} off-scope)")
-    from kash import lifecycle
+    from kash import lifecycle, schools
     print(f"  {lifecycle.format_stats(result.get('lifecycle') or {})}")
+    print(f"  {schools.format_stats(result.get('schools') or {})}")
     print(f"  detail: {result['detail']}   enrich: {result['enrich']}")
     print(f"  describe: {result['describe']}   rank: {result['rank']}")
     from kash import completeness

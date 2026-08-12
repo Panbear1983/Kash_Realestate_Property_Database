@@ -23,6 +23,7 @@ FIELD_SPEC: dict[str, dict] = {
     "longitude":      {"filler": "enrich.geocode", "blocks_alert": False, "retryable": True},
     "flood_zone":     {"filler": "enrich.flood",   "blocks_alert": True,  "retryable": True},
     "neighborhood":   {"filler": "geo_static",     "blocks_alert": False, "retryable": True},
+    "school_name":    {"filler": "schools",        "blocks_alert": False, "retryable": True},
 
     # --- core listing facts (from the search adapter) ----------------------------------------
     "street_address": {"filler": "adapter",        "blocks_alert": True,  "retryable": False},
