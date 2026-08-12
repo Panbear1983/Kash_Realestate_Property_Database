@@ -74,6 +74,64 @@ def test_bare_search_url_is_unchanged():
     assert set(fs) == {"sortSelection"}, "no prefs -> no filters, as before"
 
 
+# --- what a run proves about what it did NOT return (kash/lifecycle.py) ---------------------
+
+def _fetch_with(n_results):
+    """Run the Zillow adapter against a faked actor returning n results."""
+    import os
+    from kash.adapters import zillow_scraper as zs
+
+    prefs = {"market": "Staten Island, NY", "zips": ["10308"], "beds_min": 3,
+             "eligibility": {"store_min_baths": 2,
+                             "excluded_property_types": ["condo", "lot"]}}
+    item = {"addressStreet": "1 Test Ave", "addressZipcode": "10308",
+            "unformattedPrice": 700000, "beds": 3, "baths": 2, "homeType": "SINGLE_FAMILY"}
+
+    class R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return [dict(item) for _ in range(n_results)]
+
+    old_post, old_token = zs.requests.post, os.environ.get("APIFY_TOKEN")
+    zs.requests.post = lambda *a, **k: R()
+    os.environ["APIFY_TOKEN"] = "test-token"
+    try:
+        ad = zs.ZillowScraperAdapter(config={"results_limit": 40,
+                                             "price_min": 560915, "price_max": 640915})
+        rows = ad.fetch(prefs)
+        return ad, rows
+    finally:
+        zs.requests.post = old_post
+        if old_token is None:
+            os.environ.pop("APIFY_TOKEN", None)
+        else:
+            os.environ["APIFY_TOKEN"] = old_token
+
+
+def test_a_run_that_hits_the_cap_reports_itself_as_truncated():
+    ad, rows = _fetch_with(40)
+    assert ad.coverage(len(rows))["truncated"] is True, \
+        "40 of a possible 40 says nothing about listing 41"
+
+
+def test_a_run_under_the_cap_reports_the_slice_it_covered():
+    ad, rows = _fetch_with(7)
+    cov = ad.coverage(len(rows))
+    assert cov["truncated"] is False
+    assert cov["source"] == "zillow"
+    assert (cov["price_min"], cov["price_max"]) == (560915, 640915)
+    assert cov["beds_min"] == 3 and cov["baths_min"] == 2
+    assert cov["zips"] == ["10308"] and "condo" in cov["excluded_types"]
+
+
+def test_an_adapter_that_cannot_prove_absence_reports_none():
+    from kash.adapters.rentcast import RentCastAdapter
+    assert RentCastAdapter(config={}).coverage(600) is None, \
+        "RentCast pages per ZIP across all prices — its window is never conclusive"
+
+
 if __name__ == "__main__":
     test_derived_sources_are_implemented_adapters()
     test_manual_source_selection_rejects_unsupported_provider_names()
@@ -81,4 +139,7 @@ if __name__ == "__main__":
     test_search_url_excludes_the_rejected_property_types()
     test_unknown_excluded_type_is_ignored_not_fatal()
     test_bare_search_url_is_unchanged()
-    print("PASS — source config + Zillow query filters")
+    test_a_run_that_hits_the_cap_reports_itself_as_truncated()
+    test_a_run_under_the_cap_reports_the_slice_it_covered()
+    test_an_adapter_that_cannot_prove_absence_reports_none()
+    print("PASS — source config, Zillow query filters, run coverage")

@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from .adapters.base import SourceAdapter
 from . import eligibility
+from .dedup import match_key
 from .schema import Listing
 from .store import Store
 
@@ -65,6 +66,7 @@ def run(adapter: SourceAdapter, store: Store, prefs: dict) -> dict:
 
     tally = {"inserted": 0, "updated": 0, "unchanged": 0,
              "out_of_scope": 0, "rejected": 0}
+    seen_keys = []
     for item in raw:
         try:
             rec = Listing(**item).model_dump()
@@ -76,6 +78,8 @@ def run(adapter: SourceAdapter, store: Store, prefs: dict) -> dict:
             continue
         outcome = store.upsert(rec, source=adapter.name)
         tally[outcome] = tally.get(outcome, 0) + 1
+        if outcome != "rejected":
+            seen_keys.append(match_key(rec))
 
     events = store.conn.execute(
         "SELECT event, detail, match_key FROM changelog WHERE id>? ORDER BY id",
@@ -87,4 +91,7 @@ def run(adapter: SourceAdapter, store: Store, prefs: dict) -> dict:
         **tally,
         "pool_size": store.count(),
         "events": [dict(e) for e in events],
+        # What this run saw, and what its absence proves (kash/lifecycle.py).
+        "seen_keys": [k for k in seen_keys if k],
+        "coverage": adapter.coverage(len(raw)),
     }

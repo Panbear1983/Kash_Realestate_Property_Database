@@ -97,6 +97,15 @@ sources:
     every_days: 7
 sweep:
   band_step: 80000
+lifecycle:
+  # Age a listing to off_market when it stops coming back from searches. Only searches that
+  # returned FEWER results than their cap count as evidence — a run that hit the cap was cut
+  # off mid-list and proves nothing (see kash/lifecycle.py). Curated rows, pending/sold rows,
+  # and anything you have favorited / booked a viewing on / made an offer on are never aged.
+  # A later sighting flips the row back to active and bumps times_relisted.
+  enabled: true
+  misses_before_off_market: 2
+  max_aged_per_run: 10     # blast-radius cap; the rest wait for the next run
 rank:
   max_per_run: 15
 enrich:

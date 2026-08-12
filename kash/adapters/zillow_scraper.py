@@ -126,6 +126,17 @@ class ZillowScraperAdapter(SourceAdapter):
             baths_min=eligibility.get("store_min_baths"),
             excluded_types=eligibility.get("excluded_property_types") or (),
         )
+        # Remember what was asked for, so coverage() can say what this run proves.
+        self._query = {
+            "source": self.name,
+            "price_min": (price or {}).get("min"),
+            "price_max": (price or {}).get("max"),
+            "beds_min": preferences.get("beds_min"),
+            "baths_min": eligibility.get("store_min_baths"),
+            "excluded_types": list(eligibility.get("excluded_property_types") or ()),
+            "zips": list(preferences.get("zips") or ()),
+            "results_limit": results_limit,
+        }
         payload = {
             "searchUrls": [{"url": url}],
             "extractionMethod": "PAGINATION_WITH_ZOOM_IN",
@@ -139,6 +150,19 @@ class ZillowScraperAdapter(SourceAdapter):
         )
         resp.raise_for_status()
         return [self._stamp(self._normalize(r)) for r in (resp.json() or [])]
+
+    def coverage(self, fetched: int) -> Optional[dict]:
+        """The slice this run searched, and whether it hit the cap.
+
+        `resultsLimit` is applied by the actor before we see anything, so a run that returns
+        the full N was cut off mid-list and proves nothing about what it did not return.
+        Under the cap, the actor handed back every listing matching the query — see
+        kash/lifecycle.py, which is the only consumer.
+        """
+        q = getattr(self, "_query", None)
+        if not q:
+            return None
+        return {**q, "truncated": fetched >= int(q["results_limit"])}
 
     def _normalize(self, r: dict) -> dict:
         home = (r.get("hdpData") or {}).get("homeInfo") or {}

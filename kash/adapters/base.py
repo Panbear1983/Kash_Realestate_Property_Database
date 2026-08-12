@@ -30,6 +30,16 @@ class SourceAdapter(abc.ABC):
         """
         raise NotImplementedError
 
+    def coverage(self, fetched: int) -> Optional[dict]:
+        """What the last fetch() proves about listings it did NOT return, or None.
+
+        Absence is only evidence when a query came back under its cap — see kash/lifecycle.py.
+        An adapter that cannot describe its slice (RentCast pages per ZIP across all prices,
+        so its window is always truncated and never conclusive) returns None and no row is
+        ever aged out on its behalf.
+        """
+        return None
+
     def _stamp(self, rec: dict) -> dict:
         rec.setdefault("source", self.name)
         return rec

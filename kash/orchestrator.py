@@ -9,6 +9,7 @@ from __future__ import annotations
 from . import backup
 from . import completeness
 from . import digest as digest_mod
+from . import lifecycle
 from . import pipeline
 from . import rank
 from .enrich import enrich, enrich_details, extract_descriptions
@@ -37,6 +38,15 @@ def update(store, prefs: dict, adapters: list) -> dict:
             summaries.append(pipeline.run(adapter, store, prefs))
         except Exception as exc:  # noqa: BLE001 — an unattended loop must not die on one source
             summaries.append({"source": adapter.name, "error": str(exc)})
+
+    # 2b. Listings that have quietly gone away. Runs on this cycle's coverage, so the
+    # status_change events it writes land in step 5's digest alongside provider-reported ones.
+    try:
+        seen_keys = [k for s in summaries for k in (s.get("seen_keys") or ())]
+        lifecycle_stats = lifecycle.age_listings(
+            store, prefs, [s.get("coverage") for s in summaries], seen_keys)
+    except Exception as e:  # noqa: BLE001
+        lifecycle_stats = {"error": str(e)}
 
     # 3a. Zillow detail scrape: fill deep fields (year built, tax, HOA, agent, description…)
     try:
@@ -85,6 +95,7 @@ def update(store, prefs: dict, adapters: list) -> dict:
         "digest": digest_mod.format_text(groups),
         "pool_size": store.count(),
         "backup": snap,
+        "lifecycle": lifecycle_stats,
         "detail": detail_stats,
         "describe": describe_stats,
         "completeness": completeness.audit(store, ledger),

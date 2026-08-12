@@ -58,7 +58,7 @@ def assess(result: dict, due_sources: list[str] | None = None) -> dict:
     if unavailable:
         problems.append(f"flood lookup unavailable for {unavailable} rows")
 
-    for stage in ("detail", "describe", "rank"):
+    for stage in ("detail", "describe", "rank", "lifecycle"):
         st = result.get(stage) or {}
         if st.get("error"):
             problems.append(f"{stage}: {str(st['error'])[:120]}")
