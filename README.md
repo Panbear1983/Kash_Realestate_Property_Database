@@ -15,9 +15,11 @@ preference layers are designed to be extended to other markets.
 - Pydantic validation and address-based entity resolution
 - Protected human notes, rankings, favorites, and offer workflow fields
 - Price/status change tracking with daily digests
-- Census geocoding and FEMA flood-zone enrichment
+- Census geocoding and flood-zone enrichment, plus offline neighbourhood and zoned-school
+  lookup from frozen polygons
 - Mortgage, PITI, cap-rate, and cash-on-cash estimates
-- Codex-assisted natural-language filtering and automatic ranking
+- Natural-language filtering and ranking over a subscription model ladder (ChatGPT, Claude,
+  Gemini CLIs — no API keys), with per-user request budgets that rotate rather than cut off
 - Textual terminal dashboard plus a deterministic command shell
 - CSV export, rotating search coverage, backups, and macOS scheduling
 
@@ -56,8 +58,24 @@ status, or offer state.
 | `kash/nl.py` | Natural-language questions translated into structured queries |
 | `kash/rank.py` | Codex-assisted ranking of newly discovered listings |
 | `kash/orchestrator.py` | Resilient daily update sequence |
+| `kash/llm.py` | Subscription-CLI model ladder (codex / claude / agy) with fallback |
+| `kash/usage.py` | Per-user request budgets that rotate to the next model, not off |
+| `kash/schedule.py` | Per-source cadence, plus retry backoff after a failure |
+| `kash/sweep.py` | Rotating price band, so one run covers a slice of the range |
+| `kash/lifecycle.py` | Ages a listing to off_market — only on a search that proves absence |
+| `kash/schools.py` | Zoned elementary school from frozen DOE polygons, offline |
+| `kash/geo_static.py` | Neighbourhood from frozen NTA polygons, offline |
+| `kash/crm.py` | The buyer's own record: tours, offers, ratings, notes |
+| `kash/prefs_editor.py` | What the dashboard may change in `preferences.yaml`, and how |
+| `kash/completeness.py` | What "complete" means per field, and how far the pool is from it |
+| `kash/ledger.py` | Why a field is still empty, with per-row retry backoff |
+| `kash/notifications.py` | Alert scope, listing briefs, and Telegram chunking |
+| `kash/health.py` | Run verdict, and alerts that fire on new problems only |
+| `kash/backup.py` | Verified pre-run snapshot through WAL (never a file copy) |
 | `dashboard.py` | Textual terminal dashboard |
+| `dashboard.sh` | Dashboard launcher: any directory, checks the install, fixes TERM |
 | `shell.py` | Lightweight command-line REPL |
+| `run_update.py` | The nightly cycle (see below) |
 
 ## Quick start
 
@@ -107,15 +125,20 @@ RentCast is the preferred licensed source.
 
 ## Daily workflow
 
-`run_update.py` performs:
+`run_update.py` performs, under an exclusive lock so two runs cannot overlap:
 
-1. SQLite backup
-2. Scheduled provider fetch and merge
-3. Listing-detail enrichment
-4. Census geocoding and FEMA flood lookup
-5. Codex ranking for new listings
-6. Change digest and optional Telegram delivery
-7. Full CSV export
+1. Verified SQLite backup — a failed backup aborts the run rather than proceeding
+2. Scheduled provider fetch and merge (per-source cadence; a failed source backs off
+   1/2/4 days instead of retrying daily, which is what exhausted a monthly API quota)
+3. Ageing: listings absent from a search that came back *under* its result cap
+4. Listing-detail enrichment
+5. Census geocoding and flood lookup, then neighbourhood and school zone from frozen
+   polygons (offline, no API call)
+6. Description signals, then model ranking for new listings
+7. Completeness audit — what is missing, who fills it, and what that blocks
+8. Change digest and optional Telegram delivery
+9. Full CSV export, then a health verdict: new problems are pushed, repeats are not,
+   and a failed run exits non-zero so the scheduler's status means something
 
 ```bash
 python run_update.py --no-telegram
@@ -167,9 +190,11 @@ Use `preferences.example.yaml` and `.env.example` as safe starting templates.
 ## Project status
 
 The core ingestion, merge, enrichment, ranking, dashboard, scheduling, and export paths
-are implemented. Planned work includes stronger provider coverage, database migrations,
-comparable-sales/ARV automation, routing and school-distance enrichment, and broader
-automated testing. See [`ROADMAP.md`](ROADMAP.md) for the detailed build history.
+are implemented, along with run health and alert de-duplication, listing lifecycle ageing,
+per-field completeness auditing, and offline neighbourhood and school-zone lookup. Planned
+work includes stronger provider coverage, database migrations, comparable-sales/ARV
+automation, and commute/routing enrichment. See [`ROADMAP.md`](ROADMAP.md) for the detailed
+build history.
 
 ## Disclaimer
 
