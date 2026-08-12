@@ -105,6 +105,9 @@ def audit(store, ledger=None) -> dict:
             by_filler[info["filler"]] = by_filler.get(info["filler"], 0) + info["scraped_missing"]
 
     blocked = [r for r in scraped if missing_fields(r, alert_only=True)]
+    # Curated rows are gated by the same rule, so their gaps were silently costing the buyer
+    # alerts on their own hand-picked houses while the report only ever mentioned scraped rows.
+    blocked_curated = [r for r in curated if missing_fields(r, alert_only=True)]
 
     out = {
         "pool_size": len(rows),
@@ -114,6 +117,8 @@ def audit(store, ledger=None) -> dict:
         "by_filler": by_filler,
         "alert_blocked": len(blocked),
         "alert_blocked_reasons": _reasons(blocked),
+        "curated_alert_blocked": len(blocked_curated),
+        "curated_alert_blocked_reasons": _reasons(blocked_curated),
     }
     if ledger is not None:
         out["ledger"] = ledger.summary()
@@ -135,6 +140,11 @@ def format_report(a: dict, verbose: bool = False) -> str:
     if a["alert_blocked_reasons"]:
         why = ", ".join(f"{f} ({n})" for f, n in sorted(a["alert_blocked_reasons"].items()))
         lines.append(f"  alert-blocking gaps: {why}")
+    if a.get("curated_alert_blocked"):
+        why = ", ".join(f"{f} ({n})" for f, n
+                        in sorted(a.get("curated_alert_blocked_reasons", {}).items()))
+        lines.append(f"  curated: {a['curated']} rows, {a['curated_alert_blocked']} cannot "
+                     f"alert — {why}")
     gaps = [(f, i) for f, i in a["fields"].items() if i["scraped_missing"]]
     if verbose and gaps:
         lines.append("  by field:")

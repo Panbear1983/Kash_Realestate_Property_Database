@@ -102,6 +102,28 @@ def test_audit_omits_ledger_when_not_given_one():
 
 # --- the report -----------------------------------------------------------------------------
 
+def test_curated_rows_that_cannot_alert_are_reported():
+    """Their gaps were computed and then never printed, so the buyer's own hand-picked
+    houses could sit un-alertable with the report only ever mentioning scraped rows."""
+    s = store_with(row(property_id="SI-MT-001", baths=None, flood_zone="X"),
+                   row(property_id="SI-MT-002", listing_url=None, flood_zone="X"),
+                   row(property_id="SI-MT-003", flood_zone="X"),
+                   row(flood_zone="X"))
+    a = comp.audit(s)
+    assert a["curated"] == 3 and a["curated_alert_blocked"] == 2
+    assert a["curated_alert_blocked_reasons"] == {"baths": 1, "listing_url": 1}
+    text = comp.format_report(a)
+    assert "curated: 3 rows, 2 cannot alert" in text
+    assert "baths (1)" in text and "listing_url (1)" in text
+    s.close()
+
+
+def test_a_clean_curated_set_adds_no_noise_to_the_report():
+    s = store_with(row(property_id="SI-MT-001", flood_zone="X"), row(flood_zone="X"))
+    assert "curated:" not in comp.format_report(comp.audit(s))
+    s.close()
+
+
 def test_report_names_alert_blocking_gaps():
     s = store_with(row(flood_zone=None))
     text = comp.format_report(comp.audit(s))
