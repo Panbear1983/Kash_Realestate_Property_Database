@@ -157,6 +157,15 @@ def main():
         store.close()
         return
 
+    # Take the same lock the nightly cycle uses: this writes to the live pool, and a repair
+    # interleaved with a merge would have the two fighting over the same rows.
+    from run_update import acquire_lock
+    lock = acquire_lock(args.db)
+    if lock is None:
+        print("\nanother Kash run holds the lock — re-run once it finishes")
+        store.close()
+        sys.exit(1)
+
     snap = backup.snapshot(args.db)
     if str(snap).startswith("backup failed"):
         print(f"\nABORT: {snap}")
