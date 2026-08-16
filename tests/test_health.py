@@ -164,6 +164,21 @@ def test_legacy_state_with_failures_but_no_attempt_date_stays_due():
     assert schedule.due("rentcast", {"every_days": 7}, state) is True
 
 
+def test_a_two_day_cadence_runs_on_the_second_day():
+    """The census cadence: every other day, not daily."""
+    assert schedule.due("rentcast", {"every_days": 2}, {"rentcast": _days_ago(1)}) is False
+    assert schedule.due("rentcast", {"every_days": 2}, {"rentcast": _days_ago(2)}) is True
+
+
+def test_backoff_under_a_two_day_cadence_caps_at_two_days():
+    for fails, wait in ((1, 1), (2, 2), (5, 2)):
+        state = {"consecutive_failures": {"rentcast": fails},
+                 "last_failure": {"rentcast": _days_ago(wait)}}
+        assert schedule.due("rentcast", {"every_days": 2}, state) is True, (fails, wait)
+        state["last_failure"]["rentcast"] = _days_ago(wait - 1)
+        assert schedule.due("rentcast", {"every_days": 2}, state) is False, (fails, wait)
+
+
 # --- state file safety ----------------------------------------------------------------------
 
 def test_a_corrupt_state_file_is_moved_aside_not_silently_ignored():

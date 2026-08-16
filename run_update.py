@@ -117,7 +117,7 @@ def main():
 
     # Derive the export and run-state paths from the database being used. Previously both were
     # hardcoded to the repo, so `--db /tmp/copy.db` still overwrote the real pool_export.csv and
-    # advanced the real .last_run.json (which rotates the sweep price band) — a test against a
+    # advanced the real .last_run.json — a test against a
     # copy silently mutated production state.
     db_dir = os.path.dirname(os.path.abspath(args.db))
     db_stem = os.path.splitext(os.path.basename(args.db))[0]
@@ -145,18 +145,14 @@ def main():
         store.close()
         return
 
-    from kash import sweep
-    lo, hi = sweep.next_slice(prefs, state)   # pure read; advanced after a successful fetch
-    if lo is not None:
-        print(f"sweep slice: ${lo:,}-${hi:,}")
-
+    # No price-band sweep anymore: Zillow queries only recent listings (max_days_on_market)
+    # for discovery, and the RentCast city census re-sights the whole market every other
+    # run for free — kash/sweep.py stays on disk but nothing feeds its band to adapters.
     adapters = []
     for n in due:
         cfg = dict((prefs.get("sources") or {}).get(n, {}))
         if args.limit:
             cfg["results_limit"] = args.limit
-        if lo is not None:
-            cfg["price_min"], cfg["price_max"] = lo, hi
         adapters.append(REGISTRY[n](config=cfg))
 
     result = orchestrator.update(store, prefs, adapters)
@@ -237,7 +233,6 @@ def main():
     # goes quiet: RentCast 403'd, was recorded as having run, and its 7-day cadence then put
     # the next attempt a week away.
     by_source = {s.get("source"): s for s in result.get("summaries", [])}
-    ok_sources = []
     for n in due:
         summary = by_source.get(n) or {}
         if summary.get("error"):
@@ -245,11 +240,6 @@ def main():
             print(f"  [{n}] NOT marked as run (failure #{fails})")
         else:
             schedule.mark(n, state)
-            ok_sources.append(n)
-    # Advance the price band only if a source that consumed it succeeded; otherwise that slice
-    # of the range would be skipped until the rotation came round again.
-    if lo is not None and ok_sources:
-        sweep.advance(prefs, state)
     schedule.save(state_path, state)
 
     # Month-to-date Apify spend, printed and fed to the verdict (>=90% becomes a problem).

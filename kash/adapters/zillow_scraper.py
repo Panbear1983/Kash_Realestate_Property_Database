@@ -68,10 +68,17 @@ _EXCLUDE_FILTERS = {
 
 
 def _search_url(term: str, bounds: dict, price: dict | None = None,
-                beds_min=None, baths_min=None, excluded_types=()) -> str:
+                beds_min=None, baths_min=None, excluded_types=(),
+                max_days_on_market=None) -> str:
     """A Zillow for-sale search URL with map bounds (+ optional price slice for the
     rotating sweep), carrying the required ?searchQueryState= parameter."""
     filter_state = {"sortSelection": {"value": "days"}}
+    if max_days_on_market:
+        # Zillow's "days on Zillow" filter (accepted values 1/7/14/30/90). With it, the
+        # query returns ONLY recently-listed homes — discovery without re-buying results
+        # the RentCast census re-sights for free. Verified live 2026-08-16: a doz=7 probe
+        # returned exclusively daysOnZillow=1 items.
+        filter_state["doz"] = {"value": str(int(max_days_on_market))}
     if price and (price.get("min") or price.get("max")):
         pf = {}
         if price.get("min"):
@@ -124,6 +131,7 @@ class ZillowScraperAdapter(SourceAdapter):
             beds_min=preferences.get("beds_min"),
             baths_min=eligibility.get("store_min_baths"),
             excluded_types=eligibility.get("excluded_property_types") or (),
+            max_days_on_market=self.config.get("max_days_on_market"),
         )
         # Two queries per night, one actor run. resultsLimit is PER search URL, and the
         # actor charges per returned item, so the nightly bound is len(urls) x limit.
@@ -153,6 +161,10 @@ class ZillowScraperAdapter(SourceAdapter):
             "zips": list(preferences.get("zips") or ()),
             "results_limit": results_limit,
             "search_urls": len(urls),
+            # A doz-filtered run only saw recent listings; it can never claim conclusive
+            # coverage of the whole range (truncated semantics already prevent that at
+            # these limits, but the claim is recorded for honesty).
+            "max_days_on_market": self.config.get("max_days_on_market"),
         }
         payload = {
             "searchUrls": [{"url": u} for u in urls],
@@ -180,7 +192,11 @@ class ZillowScraperAdapter(SourceAdapter):
         q = getattr(self, "_query", None)
         if not q:
             return None
-        return {**q, "truncated": fetched >= int(q["results_limit"])}
+        # A doz-filtered (days-on-market) run is NEVER conclusive, whatever it fetched:
+        # it only asked about recent listings, so older active listings are absent by
+        # construction — treating that absence as evidence would mass-age the pool.
+        truncated = fetched >= int(q["results_limit"]) or bool(q.get("max_days_on_market"))
+        return {**q, "truncated": truncated}
 
     def _normalize(self, r: dict) -> dict:
         home = (r.get("hdpData") or {}).get("homeInfo") or {}

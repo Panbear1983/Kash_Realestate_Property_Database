@@ -96,26 +96,36 @@ llm:
       max_tokens: 1024
       timeout: 60
 sources:
+  # Division of labor by billing model: Zillow (per-RESULT billing) discovers NEW listings
+  # only; the RentCast census (per-REQUEST billing) re-sights the whole market for free.
+  # Re-sighting is what catches price drops / status changes / gone listings — it is not
+  # waste, it just must never run on the per-result meter.
   zillow:
     every_days: 1
-    # PER search URL. The nightly run posts up to two URLs — the full price range sorted
-    # newest-first (every new listing seen the night it posts) plus the rotating sweep band
-    # (re-sightings that catch price drops) — so the Apify charge is bounded at
-    # 2 x results_limit x ~$0.0023/result. 25 keeps the worst case inside the $5/month
-    # free tier; raise it only after checking the "apify:" budget line in the run report.
-    results_limit: 25
-  # RentCast's free tier allows 50 API calls/month and each ZIP costs one call per run, so
-  # this source keeps its own 6-ZIP list rather than inheriting the wider search allow-list
-  # (11 ZIPs weekly ≈ 47/month — a single backoff retry would breach the quota). Failed runs
-  # retry with backoff (1d/2d/4d, capped at every_days) precisely so a transient outage
-  # cannot burn the quota with daily retries.
+    # Worst case: results_limit x $0.0023 x 31 nights ≈ $2.85/mo of the HARD $5 Apify cap.
+    # Typical with the doz filter: 15-40 fresh listings exist per week, ~$1-2/mo.
+    results_limit: 40
+    # Zillow's days-on-Zillow filter (1/7/14/30/90): the query returns ONLY recently
+    # listed homes. 7 rather than 1 so a failed night self-heals for a week and first-week
+    # price cuts stay in the window. Remove the key to search all active listings again.
+    max_days_on_market: 7
+  # RentCast free tier = 50 API REQUESTS/month, billed per request regardless of how many
+  # records return. City mode = ONE census call for all of Staten Island, server-side
+  # filtered to your price band and beds (460 matching actives measured vs the 500/page
+  # API cap), every 2 days ≈ 16 calls/month. `city` is case-sensitive.
+  # CAUTION: mode 'zips' costs one call PER ZIP per run — if you switch to it, restore
+  # every_days: 7 (per-ZIP at census cadence ≈ 93 calls/month, double the quota).
   # Usage and the billing-cycle reset date: app.rentcast.io (API dashboard).
   rentcast:
-    every_days: 7
-    zips: ["10304", "10306", "10308", "10309", "10312", "10314"]
+    every_days: 2
+    mode: city
+    city: Staten Island
+    state: NY
+    results_limit: 500      # page size (API max); NOT a quota unit
+    zips: ["10304", "10306", "10308", "10309", "10312", "10314"]   # zips-mode fallback only
 sweep:
-  # 85000 splits 560915-900000 into exactly 4 even bands; 80000 would leave a degenerate
-  # 19k-wide 5th band that wastes a whole night of the rotation.
+  # Dormant: the nightly run no longer rotates price bands (discovery is doz-filtered and
+  # the census re-sights everything). Kept for potential future use by kash/sweep.py.
   band_step: 85000
 lifecycle:
   # Age a listing to off_market when it stops coming back from searches. Only searches that

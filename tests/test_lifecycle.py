@@ -157,6 +157,16 @@ def test_a_zip_outside_the_allow_list_is_not_covered():
     assert lifecycle.in_coverage(row(zip="10301", source="zillow"), COVERAGE) is False
 
 
+def test_an_empty_zip_constraint_covers_every_pool_zip():
+    """The census semantic: a city-wide query claims no ZIP constraint (zips: []), so a
+    rentcast row in any pool ZIP counts as covered."""
+    census = {"source": "rentcast", "price_min": 560915, "price_max": 900000,
+              "beds_min": 3, "excluded_types": [], "zips": [],
+              "results_limit": 500, "truncated": False}
+    for z in ("10304", "10301", "10310"):
+        assert lifecycle.in_coverage(row(zip=z, source="rentcast"), census) is True, z
+
+
 def test_another_providers_row_is_not_aged_by_this_search():
     r = row()
     s = store_with(r, source="rentcast")

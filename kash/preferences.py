@@ -94,10 +94,12 @@ def derive_from_csv(csv_path: str) -> dict:
                 "anthropic": {"model": "claude-haiku-4-5", "max_tokens": 1024, "timeout": 60},
             },
         },
-        # Per-source scrape cadence + caps. Staggered to spread Apify credit.
+        # Per-source scrape cadence + caps. Zillow discovers new listings (per-result
+        # billing, so it queries only recent days-on-market); the RentCast city census
+        # re-sights the whole market every other day (per-request billing — free depth).
         "sources": {
-            "zillow": {"every_days": 1, "results_limit": 40},
-            "rentcast": {"every_days": 7},
+            "zillow": {"every_days": 1, "results_limit": 40, "max_days_on_market": 7},
+            "rentcast": {"every_days": 2, "results_limit": 500},
         },
         # Rotating coverage: sweep the price range one band per run (see kash/sweep.py).
         "sweep": {"band_step": 80000},

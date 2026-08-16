@@ -181,10 +181,31 @@ def test_a_run_under_the_cap_reports_the_slice_it_covered():
     assert cov["zips"] == ["10308"] and "condo" in cov["excluded_types"]
 
 
-def test_an_adapter_that_cannot_prove_absence_reports_none():
+def test_an_adapter_that_has_not_fetched_reports_no_coverage():
+    """RentCast's city census CAN prove absence now — but only after a fetch has actually
+    established what was asked; before that it must claim nothing."""
     from kash.adapters.rentcast import RentCastAdapter
-    assert RentCastAdapter(config={}).coverage(600) is None, \
-        "RentCast pages per ZIP across all prices — its window is never conclusive"
+    assert RentCastAdapter(config={}).coverage(600) is None
+
+
+def test_the_doz_filter_lands_in_the_query_when_configured():
+    """max_days_on_market -> Zillow's days-on-Zillow filter: discovery asks only about
+    recent listings instead of re-buying results the census re-sights for free."""
+    fs = _decoded_filter_state(max_days_on_market=7)
+    assert fs["doz"] == {"value": "7"}
+    assert "doz" not in _decoded_filter_state(), "absent config, absent filter"
+
+
+def test_a_doz_filtered_run_is_never_conclusive():
+    """It only asked about recent listings — older active listings are absent by
+    construction, and treating that as evidence would mass-age the pool."""
+    ad, rows, _ = _fetch_with(7, config={"results_limit": 40, "max_days_on_market": 7})
+    cov = ad.coverage(len(rows))
+    assert cov["truncated"] is True, "7 < 40 must NOT read as complete coverage"
+    assert cov["max_days_on_market"] == 7
+    # and without the doz key, the same fetch count stays conclusive
+    ad2, rows2, _ = _fetch_with(7, config={"results_limit": 40})
+    assert ad2.coverage(len(rows2))["truncated"] is False
 
 
 if __name__ == "__main__":
