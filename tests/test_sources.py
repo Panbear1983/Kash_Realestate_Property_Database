@@ -76,16 +76,27 @@ def test_bare_search_url_is_unchanged():
 
 # --- what a run proves about what it did NOT return (kash/lifecycle.py) ---------------------
 
-def _fetch_with(n_results):
-    """Run the Zillow adapter against a faked actor returning n results."""
+FULL_RANGE = {"min": 560915, "max": 900000}
+BAND = {"price_min": 560915, "price_max": 640915}
+
+
+def _fetch_with(n_results, config=None, prefs_over=None):
+    """Run the Zillow adapter against a faked actor returning n results.
+
+    Returns (adapter, rows, posted_payload) so tests can assert on the searchUrls the
+    actor would have received.
+    """
     import os
     from kash.adapters import zillow_scraper as zs
 
     prefs = {"market": "Staten Island, NY", "zips": ["10308"], "beds_min": 3,
+             "price": dict(FULL_RANGE),
              "eligibility": {"store_min_baths": 2,
                              "excluded_property_types": ["condo", "lot"]}}
+    prefs.update(prefs_over or {})
     item = {"addressStreet": "1 Test Ave", "addressZipcode": "10308",
             "unformattedPrice": 700000, "beds": 3, "baths": 2, "homeType": "SINGLE_FAMILY"}
+    posted = {}
 
     class R:
         def raise_for_status(self):
@@ -94,14 +105,18 @@ def _fetch_with(n_results):
         def json(self):
             return [dict(item) for _ in range(n_results)]
 
+    def fake_post(url, params=None, json=None, timeout=None):
+        posted.update(json)
+        return R()
+
     old_post, old_token = zs.requests.post, os.environ.get("APIFY_TOKEN")
-    zs.requests.post = lambda *a, **k: R()
+    zs.requests.post = fake_post
     os.environ["APIFY_TOKEN"] = "test-token"
     try:
-        ad = zs.ZillowScraperAdapter(config={"results_limit": 40,
-                                             "price_min": 560915, "price_max": 640915})
+        ad = zs.ZillowScraperAdapter(
+            config=config if config is not None else {"results_limit": 40, **BAND})
         rows = ad.fetch(prefs)
-        return ad, rows
+        return ad, rows, posted
     finally:
         zs.requests.post = old_post
         if old_token is None:
@@ -110,18 +125,58 @@ def _fetch_with(n_results):
             os.environ["APIFY_TOKEN"] = old_token
 
 
+def _price_of(search_url_entry):
+    import json
+    import urllib.parse
+    q = urllib.parse.parse_qs(urllib.parse.urlparse(search_url_entry["url"]).query)
+    return json.loads(q["searchQueryState"][0])["filterState"].get("price")
+
+
+def test_a_nightly_run_posts_freshness_and_band_urls():
+    """Two queries, one actor run: the full range newest-first (a new listing is seen the
+    night it posts) plus the rotating band (re-sightings that catch price drops)."""
+    _, _, posted = _fetch_with(5)
+    urls = posted["searchUrls"]
+    assert len(urls) == 2
+    assert _price_of(urls[0]) == {"min": 560915, "max": 900000}, "freshness spans the range"
+    assert _price_of(urls[1]) == {"min": 560915, "max": 640915}, "depth is tonight's band"
+    assert posted["resultsLimit"] == 40, "the limit is per URL, not split between them"
+
+
+def test_a_band_equal_to_the_full_range_posts_one_url():
+    _, _, posted = _fetch_with(
+        5, config={"results_limit": 40, "price_min": 560915, "price_max": 900000})
+    assert len(posted["searchUrls"]) == 1, "identical queries must not be charged twice"
+
+
+def test_no_band_posts_one_full_range_url():
+    ad, rows, posted = _fetch_with(5, config={"results_limit": 40})
+    assert len(posted["searchUrls"]) == 1
+    assert _price_of(posted["searchUrls"][0]) == {"min": 560915, "max": 900000}
+    assert ad.coverage(len(rows))["search_urls"] == 1
+
+
 def test_a_run_that_hits_the_cap_reports_itself_as_truncated():
-    ad, rows = _fetch_with(40)
+    ad, rows, _ = _fetch_with(40)
     assert ad.coverage(len(rows))["truncated"] is True, \
         "40 of a possible 40 says nothing about listing 41"
 
 
+def test_a_run_at_twice_the_limit_is_still_truncated():
+    """With two URLs, fetched can reach 2x the per-URL limit."""
+    ad, rows, _ = _fetch_with(80)
+    assert ad.coverage(len(rows))["truncated"] is True
+
+
 def test_a_run_under_the_cap_reports_the_slice_it_covered():
-    ad, rows = _fetch_with(7)
+    ad, rows, _ = _fetch_with(7)
     cov = ad.coverage(len(rows))
     assert cov["truncated"] is False
     assert cov["source"] == "zillow"
-    assert (cov["price_min"], cov["price_max"]) == (560915, 640915)
+    # The claim is the FULL preference range: the freshness URL alone spans it, so a run
+    # under the cap covered the whole claimed slice regardless of the band URL.
+    assert (cov["price_min"], cov["price_max"]) == (560915, 900000)
+    assert cov["search_urls"] == 2
     assert cov["beds_min"] == 3 and cov["baths_min"] == 2
     assert cov["zips"] == ["10308"] and "condo" in cov["excluded_types"]
 
@@ -133,13 +188,9 @@ def test_an_adapter_that_cannot_prove_absence_reports_none():
 
 
 if __name__ == "__main__":
-    test_derived_sources_are_implemented_adapters()
-    test_manual_source_selection_rejects_unsupported_provider_names()
-    test_search_url_carries_beds_baths_and_price()
-    test_search_url_excludes_the_rejected_property_types()
-    test_unknown_excluded_type_is_ignored_not_fatal()
-    test_bare_search_url_is_unchanged()
-    test_a_run_that_hits_the_cap_reports_itself_as_truncated()
-    test_a_run_under_the_cap_reports_the_slice_it_covered()
-    test_an_adapter_that_cannot_prove_absence_reports_none()
-    print("PASS — source config, Zillow query filters, run coverage")
+    tests = [v for k, v in sorted(globals().items())
+             if k.startswith("test_") and callable(v)]
+    for fn in tests:
+        fn()
+        print(f"  ok  {fn.__name__}")
+    print(f"{len(tests)} passed — source config, Zillow query shape, run coverage")

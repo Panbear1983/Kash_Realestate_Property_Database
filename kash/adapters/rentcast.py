@@ -43,7 +43,12 @@ class RentCastAdapter(SourceAdapter):
 
     def fetch(self, preferences: dict) -> list[dict]:
         key = self._key()
-        zips = preferences.get("zips") or []
+        # Every ZIP costs one API call against the free tier's 50/month. The config override
+        # (sources.rentcast.zips) keeps this source on the 6 core ZIPs after the search
+        # allow-list widened to 11 — 11 weekly would run ~47 calls/month, where one backoff
+        # retry breaches the quota and starts the 403 spiral the schedule backoff exists to
+        # prevent. Zillow covers the added ZIPs nightly.
+        zips = self.config.get("zips") or preferences.get("zips") or []
         limit = int(self.config.get("results_limit") or preferences.get("fetch_limit", 100))
         out: list[dict] = []
         for zip_code in zips:

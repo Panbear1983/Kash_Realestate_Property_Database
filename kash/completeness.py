@@ -75,15 +75,29 @@ def missing_fields(row: dict, alert_only: bool = False) -> list[str]:
     return [f for f in fields if is_missing(row, f)]
 
 
-def audit(store, ledger=None) -> dict:
+def audit(store, ledger=None, prefs=None) -> dict:
     """Per-field coverage plus the rows behind it, grouped by the filler responsible.
 
     Curated and scraped rows are reported separately: the curated set was hand-entered and its
     blanks mean something different from a scraper's.
+
+    With `prefs`, rows the admission policy rejects (excluded property types, sub-minimum
+    baths) are left out of the blocked-from-alerting counts: a land lot with no bath count
+    is excluded by design, not blocked — counting it kept a permanent phantom problem in the
+    health alerts that no filler could ever resolve.
     """
     rows = store.all()
     curated = [r for r in rows if r.get("property_id")]
     scraped = [r for r in rows if not r.get("property_id")]
+
+    def counts_as_blocked(row) -> bool:
+        if not missing_fields(row, alert_only=True):
+            return False
+        if prefs is not None:
+            from . import eligibility
+            if not eligibility.classify(row, prefs).admit:
+                return False
+        return True
 
     fields = {}
     for field in MACHINE_FIELDS:
@@ -105,10 +119,10 @@ def audit(store, ledger=None) -> dict:
         if info["scraped_missing"]:
             by_filler[info["filler"]] = by_filler.get(info["filler"], 0) + info["scraped_missing"]
 
-    blocked = [r for r in scraped if missing_fields(r, alert_only=True)]
+    blocked = [r for r in scraped if counts_as_blocked(r)]
     # Curated rows are gated by the same rule, so their gaps were silently costing the buyer
     # alerts on their own hand-picked houses while the report only ever mentioned scraped rows.
-    blocked_curated = [r for r in curated if missing_fields(r, alert_only=True)]
+    blocked_curated = [r for r in curated if counts_as_blocked(r)]
 
     out = {
         "pool_size": len(rows),

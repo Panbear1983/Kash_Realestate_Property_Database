@@ -55,7 +55,13 @@ def main():
         n = store.seed_from_csv(args.csv)
         print(f"Seeded pool from CSV: {n} rows")
 
-    adapter = REGISTRY[args.source](config=prefs.get("sources", {}).get(args.source, {}))
+    cfg = dict(prefs.get("sources", {}).get(args.source, {}))
+    if args.limit:
+        # fetch_limit alone is not enough: a configured sources.<name>.results_limit
+        # overrides it inside the adapter, so "verify cheaply with --limit 5" silently
+        # fetched (and paid for) the full configured amount.
+        cfg["results_limit"] = args.limit
+    adapter = REGISTRY[args.source](config=cfg)
     try:
         summary = pipeline.run(adapter, store, prefs)
     except CredentialError as e:

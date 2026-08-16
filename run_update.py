@@ -168,8 +168,9 @@ def main():
         else:
             print(f"  [{s['source']}] fetched {s['fetched']}  +{s['inserted']} new  "
                   f"~{s['updated']} updated  ({s['out_of_scope']} off-scope)")
-    from kash import lifecycle, schools
+    from kash import lifecycle, schools, urlfill
     print(f"  {lifecycle.format_stats(result.get('lifecycle') or {})}")
+    print(f"  {urlfill.format_stats(result.get('urlfill') or {})}")
     print(f"  {schools.format_stats(result.get('schools') or {})}")
     print(f"  detail: {result['detail']}   enrich: {result['enrich']}")
     print(f"  describe: {result['describe']}   rank: {result['rank']}")
@@ -250,6 +251,14 @@ def main():
     if lo is not None and ok_sources:
         sweep.advance(prefs, state)
     schedule.save(state_path, state)
+
+    # Month-to-date Apify spend, printed and fed to the verdict (>=90% becomes a problem).
+    # The GET is free and any failure returns None — the line is simply omitted.
+    from kash import apify_budget
+    budget = apify_budget.month_to_date()
+    if budget:
+        print(f"  {apify_budget.format_line(budget)}")
+        result["apify_budget"] = budget
 
     health_report = health.assess(result, due)
     duration = time.time() - started

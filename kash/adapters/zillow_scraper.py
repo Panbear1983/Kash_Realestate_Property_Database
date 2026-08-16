@@ -120,25 +120,42 @@ class ZillowScraperAdapter(SourceAdapter):
         if self.config.get("price_min") or self.config.get("price_max"):
             price = {"min": self.config.get("price_min"), "max": self.config.get("price_max")}
         eligibility = preferences.get("eligibility") or {}
-        url = _search_url(
-            term, bounds, price,
+        filters = dict(
             beds_min=preferences.get("beds_min"),
             baths_min=eligibility.get("store_min_baths"),
             excluded_types=eligibility.get("excluded_property_types") or (),
         )
-        # Remember what was asked for, so coverage() can say what this run proves.
+        # Two queries per night, one actor run. resultsLimit is PER search URL, and the
+        # actor charges per returned item, so the nightly bound is len(urls) x limit.
+        #   1. "freshness": the full preference price range, newest first — a new listing is
+        #      seen the night it posts instead of waiting for its band's turn (up to 2 days).
+        #   2. "depth": the rotating sweep band — re-sightings that catch price drops.
+        # The band URL is skipped when it equals the full range (or no band was configured),
+        # so run_fetch and single-range setups keep their one-URL behavior and cost.
+        full_price = preferences.get("price") or None
+        urls = [_search_url(term, bounds, full_price, **filters)]
+        if price:
+            band_url = _search_url(term, bounds, price, **filters)
+            if band_url != urls[0]:
+                urls.append(band_url)
+        # Remember what was asked for, so coverage() can say what this run proves. The claim
+        # is always the FULL preference range: the freshness URL spans it in every case (a
+        # lone band URL only happens when the band IS the full range), so a run that comes
+        # back under the cap covered the whole claimed slice regardless of the band.
+        claimed = full_price
         self._query = {
             "source": self.name,
-            "price_min": (price or {}).get("min"),
-            "price_max": (price or {}).get("max"),
+            "price_min": (claimed or {}).get("min"),
+            "price_max": (claimed or {}).get("max"),
             "beds_min": preferences.get("beds_min"),
             "baths_min": eligibility.get("store_min_baths"),
             "excluded_types": list(eligibility.get("excluded_property_types") or ()),
             "zips": list(preferences.get("zips") or ()),
             "results_limit": results_limit,
+            "search_urls": len(urls),
         }
         payload = {
-            "searchUrls": [{"url": url}],
+            "searchUrls": [{"url": u} for u in urls],
             "extractionMethod": "PAGINATION_WITH_ZOOM_IN",
             "resultsLimit": results_limit,
         }
@@ -154,10 +171,11 @@ class ZillowScraperAdapter(SourceAdapter):
     def coverage(self, fetched: int) -> Optional[dict]:
         """The slice this run searched, and whether it hit the cap.
 
-        `resultsLimit` is applied by the actor before we see anything, so a run that returns
-        the full N was cut off mid-list and proves nothing about what it did not return.
-        Under the cap, the actor handed back every listing matching the query — see
-        kash/lifecycle.py, which is the only consumer.
+        `resultsLimit` applies per search URL, so with two URLs `fetched` can reach twice
+        the limit and `fetched >= results_limit` stays the conservative truncation test: a
+        total at or past one URL's cap means at least one query may have been cut off.
+        A total under it means no URL hit its cap — and since the freshness URL alone spans
+        the claimed price range, the claim is complete. kash/lifecycle.py is the consumer.
         """
         q = getattr(self, "_query", None)
         if not q:

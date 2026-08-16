@@ -2,17 +2,25 @@ market: Staten Island, NY
 # Hard allow-list — only these ZIPs are admitted to the pool. Widen it to discover new
 # areas, or set it to [] to fall back to zip_prefixes alone.
 zips:
+  - "10301"
+  - "10302"
+  - "10303"
   - "10304"
+  - "10305"
   - "10306"
   - "10308"
   - "10309"
+  - "10310"
   - "10312"
   - "10314"
 zip_prefixes:
   - "103"
+# The pool stores and searches up to price.max; alerts are gated separately by
+# eligibility.telegram_max_price, so the band between the two is a silent watchlist —
+# a listing that drops INTO alert range is caught the day it happens.
 price:
   min: 550000
-  max: 800000
+  max: 900000
 property_types:
   - sf_attached
   - sf_detached
@@ -21,7 +29,9 @@ property_types:
 neighborhoods: []
 beds_min: 3
 eligibility:
-  excluded_property_types: [condo, apartment, lot]
+  # `land` covers RentCast's "Land" lots — without it they are admitted, can never carry a
+  # bath count, and sit forever in the blocked-from-alerting tally.
+  excluded_property_types: [condo, apartment, lot, land]
   store_min_baths: 2
   telegram_min_baths: 2.5
   telegram_max_price: 800000
@@ -88,15 +98,25 @@ llm:
 sources:
   zillow:
     every_days: 1
-    results_limit: 40
-  # RentCast's free tier allows 50 API calls/month and one run costs 6 (one per ZIP), so the
-  # weekly cadence uses ~24-30/month. Failed runs retry with backoff (1d/2d/4d, capped at
-  # every_days) precisely so a transient outage cannot burn the quota with daily retries.
+    # PER search URL. The nightly run posts up to two URLs — the full price range sorted
+    # newest-first (every new listing seen the night it posts) plus the rotating sweep band
+    # (re-sightings that catch price drops) — so the Apify charge is bounded at
+    # 2 x results_limit x ~$0.0023/result. 25 keeps the worst case inside the $5/month
+    # free tier; raise it only after checking the "apify:" budget line in the run report.
+    results_limit: 25
+  # RentCast's free tier allows 50 API calls/month and each ZIP costs one call per run, so
+  # this source keeps its own 6-ZIP list rather than inheriting the wider search allow-list
+  # (11 ZIPs weekly ≈ 47/month — a single backoff retry would breach the quota). Failed runs
+  # retry with backoff (1d/2d/4d, capped at every_days) precisely so a transient outage
+  # cannot burn the quota with daily retries.
   # Usage and the billing-cycle reset date: app.rentcast.io (API dashboard).
   rentcast:
     every_days: 7
+    zips: ["10304", "10306", "10308", "10309", "10312", "10314"]
 sweep:
-  band_step: 80000
+  # 85000 splits 560915-900000 into exactly 4 even bands; 80000 would leave a degenerate
+  # 19k-wide 5th band that wastes a whole night of the rotation.
+  band_step: 85000
 lifecycle:
   # Age a listing to off_market when it stops coming back from searches. Only searches that
   # returned FEWER results than their cap count as evidence — a run that hit the cap was cut
@@ -111,7 +131,7 @@ rank:
 enrich:
   max_per_run: 50
 detail:
-  max_per_run: 15
+  max_per_run: 10        # $0.0036/result; 10 covers the 2-7 new listings/day without queueing
 describe:
   max_per_run: 15        # LLM description signals per run; idempotent, one call per new row
 schools:

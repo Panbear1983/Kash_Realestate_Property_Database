@@ -58,7 +58,7 @@ def assess(result: dict, due_sources: list[str] | None = None) -> dict:
     if unavailable:
         problems.append(f"flood lookup unavailable for {unavailable} rows")
 
-    for stage in ("detail", "describe", "rank", "lifecycle", "schools"):
+    for stage in ("detail", "describe", "rank", "lifecycle", "schools", "urlfill"):
         st = result.get(stage) or {}
         if st.get("error"):
             problems.append(f"{stage}: {str(st['error'])[:120]}")
@@ -69,6 +69,13 @@ def assess(result: dict, due_sources: list[str] | None = None) -> dict:
     comp = result.get("completeness") or {}
     if comp.get("alert_blocked"):
         problems.append(f"{comp['alert_blocked']} listings blocked from alerting")
+
+    # The Apify free tier is a HARD monthly cap: past it, actor runs fail rather than bill.
+    # Flag while there is still time to throttle (F6 -> zillow results per run).
+    budget = result.get("apify_budget")
+    if budget and budget.get("pct", 0) >= 0.9:
+        problems.append(f"Apify credit {budget['pct'] * 100:.0f}% used "
+                        f"(${budget['used']:.2f} of ${budget['cap']:.2f})")
 
     return {"verdict": DEGRADED if problems else OK, "problems": problems}
 

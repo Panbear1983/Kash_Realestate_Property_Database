@@ -124,6 +124,20 @@ def test_a_clean_curated_set_adds_no_noise_to_the_report():
     s.close()
 
 
+def test_policy_excluded_rows_are_not_counted_as_blocked():
+    """A land lot with no bath count is excluded by design, not blocked — counting it kept
+    a permanent phantom problem in the health alerts that no filler could ever resolve."""
+    prefs = {"eligibility": {"excluded_property_types": ["land"], "store_min_baths": 2,
+                             "telegram_min_baths": 2.5, "telegram_max_price": 800000}}
+    s = store_with(row(property_type="land", baths=None, flood_zone="X"),
+                   row(flood_zone=None))
+    with_prefs = comp.audit(s, prefs=prefs)
+    assert with_prefs["alert_blocked"] == 1, "the flood-gapped row still counts"
+    without = comp.audit(s)
+    assert without["alert_blocked"] == 2, "without prefs the old behavior is unchanged"
+    s.close()
+
+
 def test_report_names_alert_blocking_gaps():
     s = store_with(row(flood_zone=None))
     text = comp.format_report(comp.audit(s))

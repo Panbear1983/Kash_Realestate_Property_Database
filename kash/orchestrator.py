@@ -13,6 +13,7 @@ from . import lifecycle
 from . import pipeline
 from . import rank
 from . import schools
+from . import urlfill
 from .enrich import enrich, enrich_details, extract_descriptions
 from .ledger import Ledger
 
@@ -48,6 +49,13 @@ def update(store, prefs: dict, adapters: list) -> dict:
             store, prefs, [s.get("coverage") for s in summaries], seen_keys)
     except Exception as e:  # noqa: BLE001
         lifecycle_stats = {"error": str(e)}
+
+    # 2c. Listings whose source provides no URL (RentCast) get a synthesized search link so
+    # they can alert; runs before completeness so the same-run audit sees the fills.
+    try:
+        urlfill_stats = urlfill.fill_missing_urls(store, prefs)
+    except Exception as e:  # noqa: BLE001
+        urlfill_stats = {"error": str(e)}
 
     # 3a. Zillow detail scrape: fill deep fields (year built, tax, HOA, agent, description…)
     try:
@@ -105,10 +113,11 @@ def update(store, prefs: dict, adapters: list) -> dict:
         "pool_size": store.count(),
         "backup": snap,
         "lifecycle": lifecycle_stats,
+        "urlfill": urlfill_stats,
         "schools": school_stats,
         "detail": detail_stats,
         "describe": describe_stats,
-        "completeness": completeness.audit(store, ledger),
+        "completeness": completeness.audit(store, ledger, prefs=prefs),
         "enrich": enrich_stats,
         "rank": rank_stats,
     }
