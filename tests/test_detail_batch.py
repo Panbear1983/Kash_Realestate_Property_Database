@@ -87,6 +87,16 @@ def test_an_all_address_pool_sends_nothing_and_spends_nothing():
     assert fake.sent == []
 
 
+def test_a_relative_hdp_url_from_the_actor_is_stored_absolute():
+    """The actor returns hdpUrl without its host; written verbatim, a real listing URL
+    fails the alert path's https check and the row goes invisible on Telegram."""
+    s = store_with([row(1, zpid="111")])
+    run(s, FakeActor(answers={"111": {"yearBuilt": 1970,
+                                      "url": "/homedetails/1-Test-Ave/111_zpid/"}}))
+    stored = s.all()[0]["listing_url"]
+    assert stored == "https://www.zillow.com/homedetails/1-Test-Ave/111_zpid/"
+
+
 def test_a_successful_row_is_filled_and_resolved_in_the_ledger():
     s = store_with([row(1, zpid="111")])
     out = run(s, FakeActor(answers={"111": {"yearBuilt": 1970}}))

@@ -129,6 +129,11 @@ def enrich_details(store, limit: int = 15, prefs: Optional[dict] = None,
         if not isinstance(it, dict) or "error" in it:
             continue
         returned_url = it.get("url") or it.get("hdpUrl") or ""
+        # The actor returns hdpUrl as a relative path. Written verbatim, the stored URL
+        # fails the alert path's https check — 42 live rows (16 otherwise alert-ready)
+        # were invisible on Telegram for exactly this.
+        if returned_url.startswith("/"):
+            returned_url = "https://www.zillow.com" + returned_url
         z = str(it.get("zpid") or "") or _zpid(returned_url)
         key = zmap.get(z) or smap.get(_slug(returned_url))
         if not key:

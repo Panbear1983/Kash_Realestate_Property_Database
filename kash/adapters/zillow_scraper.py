@@ -63,13 +63,14 @@ _EXCLUDE_FILTERS = {
     "condo": ("isCondo", "isApartmentOrCondo"),
     "apartment": ("isApartment", "isApartmentOrCondo"),
     "lot": ("isLotLand",),
+    "land": ("isLotLand",),      # RentCast's spelling; same Zillow toggle as `lot`
     "manufactured": ("isManufactured",),
 }
 
 
 def _search_url(term: str, bounds: dict, price: dict | None = None,
                 beds_min=None, baths_min=None, excluded_types=(),
-                max_days_on_market=None) -> str:
+                max_days_on_market=None, include_other_listings=False) -> str:
     """A Zillow for-sale search URL with map bounds (+ optional price slice for the
     rotating sweep), carrying the required ?searchQueryState= parameter."""
     filter_state = {"sortSelection": {"value": "days"}}
@@ -79,6 +80,13 @@ def _search_url(term: str, bounds: dict, price: dict | None = None,
         # the RentCast census re-sights for free. Verified live 2026-08-16: a doz=7 probe
         # returned exclusively daysOnZillow=1 items.
         filter_state["doz"] = {"value": str(int(max_days_on_market))}
+    if include_other_listings:
+        # Explicitly include owner-listed (FSBO) and coming-soon homes alongside agent
+        # listings — segments Zillow's default view can tuck under "Other listings" and
+        # the MLS-fed census structurally cannot see. Actor-accepted (probe 2026-08-16:
+        # returned a live is_comingSoon item).
+        for toggle in ("fsba", "fsbo", "cmsn"):
+            filter_state[toggle] = {"value": True}
     if price and (price.get("min") or price.get("max")):
         pf = {}
         if price.get("min"):
@@ -132,6 +140,7 @@ class ZillowScraperAdapter(SourceAdapter):
             baths_min=eligibility.get("store_min_baths"),
             excluded_types=eligibility.get("excluded_property_types") or (),
             max_days_on_market=self.config.get("max_days_on_market"),
+            include_other_listings=bool(self.config.get("include_fsbo_coming_soon")),
         )
         # Two queries per night, one actor run. resultsLimit is PER search URL, and the
         # actor charges per returned item, so the nightly bound is len(urls) x limit.

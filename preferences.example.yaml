@@ -109,6 +109,10 @@ sources:
     # listed homes. 7 rather than 1 so a failed night self-heals for a week and first-week
     # price cuts stay in the window. Remove the key to search all active listings again.
     max_days_on_market: 7
+    # Explicitly include For-Sale-By-Owner and Coming Soon homes in discovery. Zillow's
+    # default search can tuck these under its "Other listings" tab, and RentCast's
+    # MLS-fed census structurally cannot see them — Zillow is their only entry path.
+    include_fsbo_coming_soon: true
   # RentCast free tier = 50 API REQUESTS/month, billed per request regardless of how many
   # records return. City mode = ONE census call for all of Staten Island, server-side
   # filtered to your price band and beds (460 matching actives measured vs the 500/page
@@ -137,9 +141,10 @@ lifecycle:
   misses_before_off_market: 2
   max_aged_per_run: 10     # blast-radius cap; the rest wait for the next run
 rank:
-  max_per_run: 15
+  max_per_run: 30        # LLM calls (system budget 200 req/day); rank does not gate alerts
 enrich:
-  max_per_run: 50
+  max_per_run: 200       # geocode+flood are free APIs; sized so a census-day batch of new
+                         # rows gets flood zones the same night instead of queueing 3 nights
 detail:
   max_per_run: 10        # $0.0036/result; 10 covers the 2-7 new listings/day without queueing
 describe:

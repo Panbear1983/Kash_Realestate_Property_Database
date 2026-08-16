@@ -42,9 +42,27 @@ def synthesize_url(street_address, zip_code) -> Optional[str]:
 
 
 def fill_missing_urls(store, prefs: dict) -> dict:
-    """Fill listing_url on active, policy-admitted rows that have none. Idempotent —
-    a second run finds nothing empty and writes nothing."""
-    stats = {"filled": 0, "skipped": 0}
+    """URL hygiene, run every cycle. Two passes, both idempotent:
+
+    FILL — active, policy-admitted rows with no listing_url get a synthesized search link.
+    REPAIR — rows holding a REAL listing URL stored as a relative path (`/homedetails/…`;
+    the detail actor returns hdpUrl without its host, and detail.py wrote it verbatim
+    until 2026-08-16) get the host prepended. Unconditional across statuses: a broken URL
+    is a data defect, not an alerting decision — 42 live rows, 16 of them otherwise
+    alert-ready, were invisible on Telegram for want of the prefix.
+    """
+    stats = {"filled": 0, "repaired": 0, "skipped": 0}
+    rel_keys = [r[0] for r in store.conn.execute(
+        "SELECT match_key FROM listings WHERE listing_url LIKE '/%'").fetchall()]
+    for key in rel_keys:
+        row = store.get(key)
+        if row is None:
+            continue
+        if store.update_fields(key, {"listing_url": ZILLOW + row["listing_url"]}):
+            store._log(key, "url_repaired",
+                       f"{row.get('street_address')}: relative listing URL given its host",
+                       "urlfill")
+            stats["repaired"] += 1
     keys = [r[0] for r in store.conn.execute(
         "SELECT match_key FROM listings"
         " WHERE status='active' AND (listing_url IS NULL OR listing_url='')").fetchall()]
@@ -68,10 +86,14 @@ def fill_missing_urls(store, prefs: dict) -> dict:
 def format_stats(stats: dict) -> str:
     if stats.get("error"):
         return f"url-fill: {stats['error']}"
-    filled, skipped = stats.get("filled", 0), stats.get("skipped", 0)
-    if not filled and not skipped:
+    filled = stats.get("filled", 0)
+    repaired = stats.get("repaired", 0)
+    skipped = stats.get("skipped", 0)
+    if not filled and not repaired and not skipped:
         return "url-fill: nothing to fill"
-    line = f"url-fill: {filled} listing(s) given a search link"
+    parts = [f"url-fill: {filled} given a search link"]
+    if repaired:
+        parts.append(f"{repaired} relative URL(s) repaired")
     if skipped:
-        line += f" ({skipped} skipped: unaddressed or excluded by policy)"
-    return line
+        parts.append(f"{skipped} skipped (unaddressed or excluded by policy)")
+    return ", ".join(parts)

@@ -196,6 +196,23 @@ def test_the_doz_filter_lands_in_the_query_when_configured():
     assert "doz" not in _decoded_filter_state(), "absent config, absent filter"
 
 
+def test_other_listings_toggles_appear_only_when_configured():
+    """FSBO + coming-soon live under Zillow's 'Other listings' tab; the census cannot see
+    them, so discovery must ask explicitly — but only when the config key says so."""
+    fs = _decoded_filter_state(include_other_listings=True)
+    for toggle in ("fsba", "fsbo", "cmsn"):
+        assert fs[toggle] == {"value": True}, toggle
+    fs_off = _decoded_filter_state()
+    for toggle in ("fsba", "fsbo", "cmsn"):
+        assert toggle not in fs_off, "absent config must leave Zillow's defaults alone"
+
+
+def test_the_land_exclusion_reaches_the_query():
+    fs = _decoded_filter_state(excluded_types=["land"])
+    assert fs["isLotLand"] == {"value": False}, \
+        "RentCast's 'land' spelling must map to the same toggle as 'lot'"
+
+
 def test_a_doz_filtered_run_is_never_conclusive():
     """It only asked about recent listings — older active listings are absent by
     construction, and treating that as evidence would mass-age the pool."""

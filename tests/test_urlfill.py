@@ -70,7 +70,7 @@ def test_telegram_accepts_the_synthesized_url():
 def test_urlless_active_rows_are_filled_and_logged_once():
     s = store_with(row())
     stats = urlfill.fill_missing_urls(s, PREFS)
-    assert stats == {"filled": 1, "skipped": 0}
+    assert stats == {"filled": 1, "repaired": 0, "skipped": 0}
     stored = s.get(match_key(row()))
     assert stored["listing_url"].endswith("45-Fairlawn-Loop-Staten-Island-NY-10308/")
     events = [e for e in s.recent_changes(10) if e["event"] == "url_synthesized"]
@@ -80,7 +80,7 @@ def test_urlless_active_rows_are_filled_and_logged_once():
 def test_filling_is_idempotent():
     s = store_with(row())
     urlfill.fill_missing_urls(s, PREFS)
-    assert urlfill.fill_missing_urls(s, PREFS) == {"filled": 0, "skipped": 0}
+    assert urlfill.fill_missing_urls(s, PREFS) == {"filled": 0, "repaired": 0, "skipped": 0}
     assert len([e for e in s.recent_changes(10) if e["event"] == "url_synthesized"]) == 1
 
 
@@ -88,15 +88,40 @@ def test_policy_excluded_rows_are_skipped_not_dressed_up():
     """A land lot can never alert; a link would only disguise an out-of-policy row."""
     s = store_with(row(property_type="land", baths=None))
     stats = urlfill.fill_missing_urls(s, PREFS)
-    assert stats == {"filled": 0, "skipped": 1}
+    assert stats == {"filled": 0, "repaired": 0, "skipped": 1}
     assert s.get(match_key(row()))["listing_url"] is None
 
 
 def test_rows_with_a_real_url_are_untouched():
     real = "https://www.zillow.com/homedetails/x/123_zpid/"
     s = store_with(row(listing_url=real))
-    assert urlfill.fill_missing_urls(s, PREFS) == {"filled": 0, "skipped": 0}
+    assert urlfill.fill_missing_urls(s, PREFS) == {"filled": 0, "repaired": 0, "skipped": 0}
     assert s.get(match_key(row()))["listing_url"] == real
+
+
+# --- the repair pass ------------------------------------------------------------------------
+# The detail actor returns hdpUrl as a relative path; written verbatim, a REAL listing URL
+# fails the alert path's https check. 42 live rows (16 otherwise alert-ready) were invisible
+# on Telegram for exactly this.
+
+def test_a_relative_homedetails_url_is_repaired():
+    s = store_with(row(listing_url="/homedetails/45-Fairlawn-Loop/789_zpid/"))
+    stats = urlfill.fill_missing_urls(s, PREFS)
+    assert stats == {"filled": 0, "repaired": 1, "skipped": 0}
+    stored = s.get(match_key(row()))["listing_url"]
+    assert stored == "https://www.zillow.com/homedetails/45-Fairlawn-Loop/789_zpid/"
+    from kash.notifications import _is_clickable_url
+    assert _is_clickable_url(stored), "the repair's whole point is passing the alert gate"
+    events = [e for e in s.recent_changes(10) if e["event"] == "url_repaired"]
+    assert len(events) == 1
+    assert urlfill.fill_missing_urls(s, PREFS)["repaired"] == 0, "idempotent"
+
+
+def test_the_repair_reaches_non_active_rows_too():
+    """A broken URL is a data defect, not an alerting decision."""
+    s = store_with(row(status="sold", listing_url="/homedetails/x/9_zpid/"))
+    assert urlfill.fill_missing_urls(s, PREFS)["repaired"] == 1
+    assert s.get(match_key(row()))["listing_url"].startswith("https://")
 
 
 def test_off_market_rows_are_left_alone():
