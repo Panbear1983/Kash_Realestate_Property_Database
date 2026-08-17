@@ -82,8 +82,9 @@ def parse_command(line: str):
     """Parse a REPL query line into (filters, sort, order, limit).
     Recognizes bare `field OP value` tokens plus `sort:FIELD`, `order:desc`, `limit:N`."""
     toks = shlex.split(line)
-    # default limit high so a filter shows ALL matches (the table scrolls); use limit:N to cap.
-    sort, order, limit, filt = "rank", "asc", 200, []
+    # default limit high so a filter shows ALL matches (the table scrolls); use limit:N to
+    # cap. 200 dated from an 88-row pool — the census-fed pool is several hundred rows.
+    sort, order, limit, filt = "rank", "asc", 2000, []
     for t in toks:
         if t.startswith("sort:"):
             sort = t.split(":", 1)[1]

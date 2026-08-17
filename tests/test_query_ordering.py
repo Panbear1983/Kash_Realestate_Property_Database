@@ -80,6 +80,14 @@ def test_no_sort_means_no_order_by():
     assert "ORDER BY" not in sql
 
 
+def test_the_default_repl_limit_covers_the_whole_pool():
+    """200 dated from an 88-row pool; the census-fed pool is several hundred rows, and a
+    default that silently clips 'show me tier=A' misrepresents the database."""
+    _, _, _, limit = query.parse_command("tier=A")
+    assert limit >= 2000
+    assert query.parse_command("tier=A limit:10")[3] == 10, "an explicit cap still wins"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]
