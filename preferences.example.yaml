@@ -76,7 +76,9 @@ llm:
       requests_per_day: 40
     system:                # batch jobs (rank, describe) get their own allowance
       requests_per_day: 200
-    per_actor: {}          # '<telegram_user_id>': {requests_per_day: 200}
+    per_actor:             # '<telegram_user_id>': {requests_per_day: 200}
+      "0":                 # the dashboard chat meters as actor 0 (the owner's surface)
+        requests_per_day: 200
   backends:
     codex:
       bin: codex
