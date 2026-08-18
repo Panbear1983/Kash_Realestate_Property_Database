@@ -30,6 +30,7 @@ acceptable because it only guards against bursts; the durable daily ceiling is
 """
 from __future__ import annotations
 
+import re
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
@@ -159,9 +160,79 @@ _FAIL_CLOSED_DROPS = (
 )
 
 
+# --- follow-up memory ---------------------------------------------------------------------
+# "which of those has a backyard?" only works if "those" means something. When the message
+# carries an anaphor AND a session exists, the new query is answered WITHIN the last
+# result set; an ordinal ("the second one", "#3") picks a single home from it. Detection is
+# deliberately narrow — a plain new question must never be silently scoped to old results.
+
+_FOLLOWUP = re.compile(
+    r"\b(those|these|them|of the above|the ones|which ones?|that list|the list)\b"
+    r"|\bthe (first|second|third|fourth|fifth|last) one\b|#\d+\b",
+    re.IGNORECASE)
+_ORDINAL_RE = re.compile(r"\bthe (first|second|third|fourth|fifth|last) one\b|#(\d+)\b",
+                         re.IGNORECASE)
+_ORDINALS = {"first": 0, "second": 1, "third": 2, "fourth": 3, "fifth": 4, "last": -1}
+
+
+def _session_key(row: dict):
+    """MUST mirror chat_sessions.save_search's key derivation, or intersections miss."""
+    return (row.get("property_id") or row.get("source_url")
+            or row.get("listing_url") or row.get("match_key"))
+
+
+def _ordinal_index(message: str):
+    m = _ORDINAL_RE.search(message or "")
+    if not m:
+        return None
+    if m.group(1):
+        return _ORDINALS[m.group(1).lower()]
+    return int(m.group(2)) - 1
+
+
+def _rows_for_session_keys(ro, keys) -> list[dict]:
+    """Resolve saved session keys back to rows, preserving the list's order."""
+    out = []
+    for key in keys:
+        hit = ro.execute_select(
+            "SELECT * FROM listings WHERE property_id=? OR source_url=?"
+            " OR listing_url=? OR match_key=? LIMIT 1", (key, key, key, key))
+        if hit:
+            out.append(hit[0])
+    return out
+
+
+def _followup_pick(user_id: int, *, store, keys, index: int,
+                   session_store) -> Optional[Reply]:
+    """An ordinal reference into the last list — render that one home in full."""
+    access = Access(store)
+    if not access.is_allowed(user_id):
+        return None                      # let the normal flow run its pending/denied path
+    row_meta = _known(access, user_id) or {}
+    level = (row_meta.get("access_level") or "read").lower()
+    rows = _rows_for_session_keys(ReadOnlyStore(store), keys)
+    if not rows:
+        return None
+    if index == -1:
+        index = len(rows) - 1
+    if not 0 <= index < len(rows):
+        return _split(f"Your last list has {len(rows)} home(s) — pick one of those.",
+                      "clarify")
+    picked = rows[index]
+    if session_store is not None:
+        try:
+            session_store.save(user_id, filters={}, listing_keys=list(keys),
+                               selected_key=_session_key(picked))
+        except Exception:  # noqa: BLE001 — memory must never block an answer
+            pass
+    return _split(_render_rows([picked], f"From your last list, #{index + 1}:", level),
+                  "query", rows=(picked,))
+
+
 def _database_reply(user_id: int, name, message: str, *, store, prefs: dict,
                     spec: reasoning_contract.RouteSpec | None, backend,
-                    session_store: chat_sessions.SessionStore | None = None) -> Reply:
+                    session_store: chat_sessions.SessionStore | None = None,
+                    followup_keys=None) -> Reply:
     """The only Phase 3 branch allowed to construct database-facing objects."""
     access = Access(store)
     ro = ReadOnlyStore(store)
@@ -217,6 +288,14 @@ def _database_reply(user_id: int, name, message: str, *, store, prefs: dict,
         return _split(reply or "Nothing matches that one — want to loosen it a bit?",
                       "empty_result", backend=chosen, dropped=safe.dropped)
     lead = reply or f"{len(rows)} match:"
+    if followup_keys:
+        keep = {str(k) for k in followup_keys}
+        narrowed = [r for r in rows if str(_session_key(r)) in keep]
+        if narrowed:
+            rows = narrowed
+            lead = f"Within your last list — {lead}"
+        else:
+            lead = f"{lead} (none of your last list matched; showing the whole pool)"
     if session_store is not None:
         try:
             session_store.save_search(user_id, filters={"sort": safe.sort}, rows=rows)
@@ -345,8 +424,6 @@ def _market_comparison_reply(user_id: int, name, *, store, plan, backend, provid
 
 # --- pre-route detectors (deterministic, zero-model) --------------------------------------------
 
-import re
-
 _SHOW_ALL_ACTIVE = re.compile(
     r"\b(?:show|list|produce|get|give)\b.*\b(?:all|every)\b.*\bactive\b|\b(?:all|every)\b.*\bactive\b.*\b(?:listing|listings|home|homes|property|properties)\b",
     re.IGNORECASE,
@@ -442,6 +519,23 @@ def handle(user_id, name, text, *, store, prefs=None, backend=None,
     if _throttled(user_id, int(cfg.get("rate_limit_per_minute", DEFAULT_RATE_PER_MINUTE)), now):
         return Reply(texts=("Easy there — give me a minute to catch up.",), kind="throttled")
 
+    # Follow-up memory: an anaphor ("those", "#2") plus a live session scopes this message
+    # to the last result set. Detection failing open to a normal query is the safe default.
+    followup_keys = None
+    if session_store is not None and _FOLLOWUP.search(message):
+        try:
+            sess = session_store.load(user_id)
+        except Exception:  # noqa: BLE001 — memory must never block an answer
+            sess = None
+        if sess and sess.get("listing_keys"):
+            followup_keys = tuple(sess["listing_keys"])
+            index = _ordinal_index(message)
+            if index is not None:
+                picked = _followup_pick(user_id, store=store, keys=followup_keys,
+                                        index=index, session_store=session_store)
+                if picked is not None:
+                    return picked
+
     # Recognition is pure; only a confirmed command may enter the database branch.
     if commands.is_command(message):
         return _database_reply(user_id, name, message, store=store, prefs=prefs,
@@ -490,7 +584,8 @@ def handle(user_id, name, text, *, store, prefs=None, backend=None,
             valid=True,
         )
         return _database_reply(user_id, name, message, store=store, prefs=prefs,
-                               spec=spec, backend=None, session_store=session_store)
+                               spec=spec, backend=None, session_store=session_store,
+                               followup_keys=followup_keys)
 
     if _is_average_price(message):
         # Delegate to existing overall price aggregate handler
@@ -509,7 +604,8 @@ def handle(user_id, name, text, *, store, prefs=None, backend=None,
             valid=True,
         )
         return _database_reply(user_id, name, message, store=store, prefs=prefs,
-                               spec=spec, backend=None, session_store=session_store)
+                               spec=spec, backend=None, session_store=session_store,
+                               followup_keys=followup_keys)
 
     if _is_recently_sold(message):
         # Sold listings, sorted by sold_date desc, up to 20 results
@@ -524,7 +620,8 @@ def handle(user_id, name, text, *, store, prefs=None, backend=None,
             valid=True,
         )
         return _database_reply(user_id, name, message, store=store, prefs=prefs,
-                               spec=spec, backend=None, session_store=session_store)
+                               spec=spec, backend=None, session_store=session_store,
+                               followup_keys=followup_keys)
 
     if _is_new_listings_recent(message):
         # Active listings with first_seen_date genuinely in the last N days. The previous
@@ -545,7 +642,8 @@ def handle(user_id, name, text, *, store, prefs=None, backend=None,
             valid=True,
         )
         return _database_reply(user_id, name, message, store=store, prefs=prefs,
-                               spec=spec, backend=None, session_store=session_store)
+                               spec=spec, backend=None, session_store=session_store,
+                               followup_keys=followup_keys)
 
     # Deliberately omit actor/store: route selection cannot consult access, usage, or listings.
     if backend is None:
@@ -578,4 +676,5 @@ def handle(user_id, name, text, *, store, prefs=None, backend=None,
     if spec.route == reasoning_contract.WEB_RESEARCH:
         return _web_reply(message, spec, backend=backend, provider=web_provider)
     return _database_reply(user_id, name, message, store=store, prefs=prefs,
-                           spec=spec, backend=backend, session_store=session_store)
+                           spec=spec, backend=backend, session_store=session_store,
+                           followup_keys=followup_keys)

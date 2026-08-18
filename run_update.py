@@ -275,6 +275,20 @@ def main():
         if recipients:
             push_telegram(alert_text, recipients)
 
+    # Weekly market pulse: one short push summarizing what the census saw. Rides the same
+    # per-source cadence state ("pulse", every 7 days) and only marks itself run when a
+    # recipient actually received it — a --no-telegram test run never consumes the slot.
+    if schedule.due("pulse", {"every_days": 7}, state):
+        from kash import pulse
+        pulse_text = pulse.format_pulse(pulse.compute(store, prefs))
+        print(f"\n--- MARKET PULSE ---\n{pulse_text}")
+        if not args.no_telegram:
+            recipients = testing_recipients(Access(store).allowed_ids(), prefs)
+            outcomes = push_telegram(pulse_text, recipients) if recipients else {}
+            if any(v == "sent" for v in outcomes.values()):
+                schedule.mark("pulse", state)
+                schedule.save(state_path, state)
+
     # Checkpoint the WAL before closing: the Telegram bridge holds a permanent connection,
     # so the close-time auto-checkpoint never runs and the WAL had grown to 4x the
     # database. TRUNCATE resets it whenever no reader is mid-transaction (best effort).

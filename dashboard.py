@@ -544,6 +544,9 @@ class KashDashboard(App):
         self._last_filter: str | None = None
         self._last_filter_note = ""
         self._pool_seen = None
+        # Chat follow-up memory ("which of those…", "the second one") — 30-min TTL.
+        from kash.chat_sessions import SessionStore
+        self._chat_sessions = SessionStore()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -723,7 +726,8 @@ class KashDashboard(App):
             dashboard_prefs = dict(self.prefs)
             dashboard_prefs["chat"] = {**(self.prefs.get("chat") or {}), "enabled": True}
             result = chat.handle(0, "Dashboard owner", message, store=self.store,
-                                 prefs=dashboard_prefs, backend=backend)
+                                 prefs=dashboard_prefs, backend=backend,
+                                 session_store=self._chat_sessions)
             reply, rows, rung = result.text, list(result.rows), result.backend
             # Market comparisons deliberately carry no rows, so the current table stays in
             # place. Ordinary database queries retain the existing table-refresh behavior.
