@@ -53,6 +53,7 @@ def _service(tmpdir):
     roles.grant(1, CONTRIBUTOR, ROLE_CONTRIBUTOR, reason="document draft test")
     workspaces = ContributorWorkspaces(shared, roles, root=Path(tmpdir))
     workspaces.create(1, CONTRIBUTOR, reason="document draft test")
+    workspaces.set_auto_sync(1, CONTRIBUTOR, enabled=True, reason="test opt-in")
     return ContributorWorkspaceService(workspaces, WorkspaceAutoSync(shared))
 
 

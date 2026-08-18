@@ -33,6 +33,9 @@ def _setup(tmpdir):
     roles.grant(OWNER, CONTRIBUTOR, ROLE_CONTRIBUTOR, reason="approved workspace canary")
     workspaces = ContributorWorkspaces(shared, roles, root=Path(tmpdir))
     workspaces.create(OWNER, CONTRIBUTOR, reason="initial workspace")
+    # auto-sync now defaults OFF (additions must pass owner review); these
+    # suites exercise the sync mechanics, so the owner opts this canary in.
+    workspaces.set_auto_sync(OWNER, CONTRIBUTOR, enabled=True, reason="test opt-in")
     return ContributorWorkspaceService(workspaces, WorkspaceAutoSync(shared))
 
 
@@ -43,6 +46,9 @@ def _setup_with_shared(tmpdir):
     roles.grant(OWNER, CONTRIBUTOR, ROLE_CONTRIBUTOR, reason="approved workspace canary")
     workspaces = ContributorWorkspaces(shared, roles, root=Path(tmpdir))
     workspaces.create(OWNER, CONTRIBUTOR, reason="initial workspace")
+    # auto-sync now defaults OFF (additions must pass owner review); these
+    # suites exercise the sync mechanics, so the owner opts this canary in.
+    workspaces.set_auto_sync(OWNER, CONTRIBUTOR, enabled=True, reason="test opt-in")
     return ContributorWorkspaceService(workspaces, WorkspaceAutoSync(shared)), shared
 
 

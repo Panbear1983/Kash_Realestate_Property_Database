@@ -6,6 +6,7 @@ from datetime import date
 from urllib.parse import urlparse
 
 from .data_roles import DataRoles, ROLE_OWNER
+from .dedup import match_key
 from .schema import CALC_FIELDS, FIELD_ORDER, USER_PROTECTED, Listing
 
 PROPOSAL_ADD = "add"
@@ -16,6 +17,11 @@ PUBLIC_EDITABLE_FIELDS = frozenset(FIELD_ORDER) - USER_PROTECTED - CALC_FIELDS -
     "rank", "tier", "target_buy_price", "arv_estimate", "brrrr_rating", "bid_estimate",
     "investment_thesis", "analysis", "my_notes", "favorite", "viewing_status",
     "viewing_date", "offer_status", "user_rating", "contacted_agent",
+    # Provenance is the system's, never a contributor's: a payload carrying `source`
+    # would erase the human-reviewed:<id> marker publish() just stamped, and forged
+    # first_seen/fetched dates would fire new-listing alerts.
+    "source", "source_url", "first_seen_date", "fetched_at", "last_updated",
+    "property_id",
 }
 
 
@@ -68,6 +74,14 @@ class ContributionService:
         self._require_submitter(actor_id)
         payload = self._validate_fields(fields)
         self._validate_source(source_url, observed_at)
+        # An "add" for an address the pool already tracks would MERGE on publish (upsert
+        # by match_key) with publish_audit.before_json = null — an unrecoverable
+        # overwrite disguised as an insert. Force the correction path instead.
+        existing_key = match_key(payload)
+        if existing_key and self.store.get(existing_key) is not None:
+            raise ValueError(
+                f"a listing for this address already exists ({existing_key}); "
+                "submit a correction instead of an add")
         cursor = self.conn.execute(
             "INSERT INTO listing_proposals(submitted_by,kind,status,payload_json,source_url,observed_at) VALUES(?,?,?,?,?,?)",
             (int(actor_id), PROPOSAL_ADD, "pending", json.dumps(payload, sort_keys=True), source_url, observed_at),

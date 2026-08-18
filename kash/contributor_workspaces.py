@@ -22,7 +22,10 @@ class ContributorWorkspaces:
                 contributor_id INTEGER PRIMARY KEY,
                 workspace_key TEXT UNIQUE NOT NULL,
                 enabled INTEGER NOT NULL DEFAULT 1,
-                auto_sync_additions INTEGER NOT NULL DEFAULT 1,
+                -- 0 by default: an auto-synced addition reaches the shared pool with NO
+                -- review, bypassing the entire proposal/F3 pathway. An owner must opt a
+                -- contributor in explicitly via set_auto_sync.
+                auto_sync_additions INTEGER NOT NULL DEFAULT 0,
                 created_by INTEGER NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 disabled_at TEXT,
@@ -44,7 +47,7 @@ class ContributorWorkspaces:
         self.conn.execute(
             """INSERT INTO contributor_workspaces
                (contributor_id, workspace_key, enabled, auto_sync_additions, created_by, reason)
-               VALUES(?,?,1,1,?,?)""",
+               VALUES(?,?,1,0,?,?)""",
             (int(contributor_id), key, int(actor_id), self._reason(reason)),
         )
         self.conn.commit()
