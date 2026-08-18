@@ -33,7 +33,10 @@ eligibility:
   # bath count, and sit forever in the blocked-from-alerting tally.
   excluded_property_types: [condo, apartment, lot, land]
   store_min_baths: 2
-  telegram_min_baths: 2.5
+  # 2.0 passes ~57% of new listings (~5 alerts/day at current inflow); 2.5 passed ~22%
+  # (~2/day). Changed 2026-08-18 at the owner's request, forward-only (see
+  # scripts/quiet_gate_change.py for how the back-catalog was kept quiet).
+  telegram_min_baths: 2
   telegram_max_price: 800000
   safe_flood_zones: [X]
 telegram_recipient_ids: [7512954760, 5143942438]

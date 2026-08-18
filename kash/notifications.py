@@ -93,7 +93,8 @@ def unsent_actionable_listings(store, recipient_id: int, prefs: dict) -> list[di
 def format_onboarding() -> str:
     return (
         "Robo Kash testing is active. Robo Kash stores qualifying homes for review and sends "
-        "linked alerts only for 2.5+ bath homes with a verified safe flood status. "
+        "linked alerts only for homes meeting the configured bath minimum with a "
+        "verified safe flood status. "
         "Telegram is read-only for now; search settings stay in the local dashboard. "
         "two-way Telegram interaction is planned for a later controlled update."
     )
