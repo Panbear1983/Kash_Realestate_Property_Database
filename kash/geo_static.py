@@ -109,16 +109,36 @@ def _in_ring(lat: float, lon: float, ring: list) -> bool:
     return inside
 
 
+def _point_segment_metres(lat, lon, a, b) -> float:
+    """Distance to one GeoJSON [lon, lat] segment at Staten Island scale."""
+    scale = math.cos(math.radians(lat))
+    px, py = lon * scale, lat
+    ax, ay = a[0] * scale, a[1]
+    bx, by = b[0] * scale, b[1]
+    dx, dy = bx - ax, by - ay
+    denom = dx * dx + dy * dy
+    t = 0.0 if not denom else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / denom))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy)) * 111_000
+
+
 def locate_nta(lat: float, lon: float) -> Optional[str]:
-    """The official NTA containing this point, or None if outside Staten Island."""
+    """Official containing NTA, with a narrow fallback for simplified-boundary gaps."""
     if lat is None or lon is None:
         return None
+    nearest = (float("inf"), None)
     for area in _areas():
         for poly in area["polys"]:
             # poly[0] is the outer ring; any further rings are holes.
             if _in_ring(lat, lon, poly[0]) and not any(_in_ring(lat, lon, h) for h in poly[1:]):
                 return area["name"]
-    return None
+            ring = poly[0]
+            for i, point in enumerate(ring):
+                distance = _point_segment_metres(lat, lon, point, ring[(i + 1) % len(ring)])
+                if distance < nearest[0]:
+                    nearest = (distance, area["name"])
+    # The frozen polygons are simplified to ~40 m.  Assigning only points within 50 m closes
+    # slivers along shared boundaries without turning genuinely out-of-area coordinates into SI.
+    return nearest[1] if nearest[0] <= 50 else None
 
 
 def _metres(lat1, lon1, lat2, lon2) -> float:

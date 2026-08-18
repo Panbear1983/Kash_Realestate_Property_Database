@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from kash.access import Access  # noqa: E402
 from kash.notifications import (  # noqa: E402
     actionable_listings, format_listing_brief, format_onboarding, format_testing_digest,
-    listing_delivery_kind, testing_recipients, unsent_actionable_listings,
+    health_recipients, listing_delivery_kind, testing_recipients, unsent_actionable_listings,
 )
 from kash.store import Store  # noqa: E402
 from run_update import push_telegram  # noqa: E402
@@ -40,6 +40,14 @@ def test_explicit_testing_recipient_list_is_limited_to_allowed_accounts():
     prefs = {"telegram_recipient_ids": [7512954760, 5143942438]}
     assert testing_recipients([5143942438, 5584430379, 7512954760], prefs) == [7512954760, 5143942438]
     assert testing_recipients([5143942438], prefs) == [5143942438]
+
+
+def test_health_alerts_go_only_to_configured_owner_recipient():
+    prefs = {
+        "telegram_recipient_ids": [7512954760, 5143942438],
+        "telegram_health_recipient_ids": [7512954760],
+    }
+    assert health_recipients([5143942438, 7512954760], prefs) == [7512954760]
 
 
 def test_onboarding_delivery_state_is_per_recipient():

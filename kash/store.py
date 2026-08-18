@@ -170,6 +170,29 @@ class Store:
     def count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM listings").fetchone()[0]
 
+    def price_summary(self, status: str = "active") -> dict:
+        """Return a fixed, aggregate-only list-price summary.
+
+        This is deliberately not a general SQL escape hatch.  Market comparison callers need
+        a deterministic local statistic, never listing rows, and the status stays a bound
+        parameter rather than becoming interpolated SQL.
+        """
+        row = self.conn.execute(
+            "SELECT COUNT(list_price) AS listing_count, AVG(list_price) AS average_list_price, "
+            "MIN(list_price) AS minimum_list_price, MAX(list_price) AS maximum_list_price "
+            "FROM listings WHERE status=? AND list_price IS NOT NULL",
+            (status,),
+        ).fetchone()
+        return dict(row)
+
+    def overall_price_summary(self) -> dict:
+        """Return the fixed all-status list-price aggregate used by canonical chat."""
+        row = self.conn.execute(
+            "SELECT COUNT(list_price) AS listing_count, AVG(list_price) AS average_list_price "
+            "FROM listings WHERE list_price IS NOT NULL"
+        ).fetchone()
+        return dict(row)
+
     def execute_select(self, sql: str, params=()) -> list[dict]:
         """Run a SELECT * built by kash.query and decode rows to schema dicts."""
         rows = self.conn.execute(sql, params).fetchall()
@@ -211,6 +234,30 @@ class Store:
             f"INSERT OR REPLACE INTO listings ({colnames}) VALUES ({placeholders})",
             vals,
         )
+
+    def insert_new_only(self, incoming: dict, source: str) -> bool:
+        """Atomically insert a new listing; never merge or overwrite an existing identity."""
+        incoming = dict(incoming)
+        key = match_key(incoming)
+        if not key:
+            return False
+        today = date.today().isoformat()
+        incoming["source"] = incoming.get("source") or source
+        incoming["fetched_at"] = today
+        incoming["first_seen_date"] = incoming.get("first_seen_date") or today
+        incoming["last_updated"] = incoming.get("last_updated") or today
+        record = finance.recompute(incoming, self.finance_cfg)
+        cols = ["match_key"] + FIELD_ORDER
+        vals = [key] + [_to_db(field, record.get(field)) for field in FIELD_ORDER]
+        placeholders = ",".join("?" * len(cols))
+        colnames = ",".join(f'"{column}"' for column in cols)
+        cursor = self.conn.execute(
+            f"INSERT OR IGNORE INTO listings ({colnames}) VALUES ({placeholders})", vals
+        )
+        if cursor.rowcount:
+            self._log(key, "new_listing", f"{incoming.get('street_address')} @ {incoming.get('list_price')}", source)
+        self.conn.commit()
+        return bool(cursor.rowcount)
 
     def upsert(self, incoming: dict, source: str) -> str:
         """Merge one incoming (already-validated) record. Returns the outcome:

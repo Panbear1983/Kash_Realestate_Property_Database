@@ -92,6 +92,12 @@ def test_polygon_file_is_present_and_covers_staten_island():
 
 # --- accuracy against the curated set -------------------------------------------------------
 
+def test_simplified_polygon_boundary_gap_uses_nearest_nta_only_within_50m():
+    # This curated-coordinate point is 3.5m outside a simplified shared border, not outside SI.
+    assert gs.locate_nta(40.569345, -74.143675) == "Oakwood-Richmondtown"
+    assert gs.locate_nta(40.6892, -74.0445) is None  # Statue of Liberty: not Staten Island
+
+
 def test_all_pool_rows_place_inside_an_nta():
     rows = _curated()
     if not rows:
