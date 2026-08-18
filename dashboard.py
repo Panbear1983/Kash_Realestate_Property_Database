@@ -10,7 +10,9 @@ Two ways to interact, side by side:
         (the same brain the Telegram bot uses). A chat that returns listings also
         refreshes the table.
 
-Keys: q quit · / focus filter · c focus chat · r reload · arrows move the table.
+Keys: q quit · / filter · c chat · r/F5 reload · n new listings · o open link ·
+F2 bot access · F3 review proposals · F4 sync audit · F6 preferences ·
+F7 tour/offer. The table auto-refreshes when the pool changes on disk.
 """
 from __future__ import annotations
 
@@ -22,6 +24,7 @@ from collections import Counter
 
 from textual import work
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll, Grid
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static, Select, TextArea, Button
@@ -51,6 +54,8 @@ COLUMNS = [
     ("Neighborhood", "neighborhood"), ("Address", "street_address"),
     ("Price", "list_price"), ("BD", "beds"), ("BA", "baths"), ("SqFt", "sqft"),
     ("$/SF", "price_per_sqft"), ("Flood", "flood_zone"),
+    ("School", "school_name"),        # populated on ~all rows; was visible nowhere
+    ("Seen", "first_seen_date"),      # what the 'n' view sorts by — now a visible column
     ("Status", "status"), ("Src", "source"),
 ]
 
@@ -137,6 +142,9 @@ class AccessFormScreen(ModalScreen):
     #f-msg-box { height: 5; margin-bottom: 1; }
     #f-greet-box { height: 8; margin-bottom: 1; }
     #f-buttons { height: 3; align: right middle; }
+    .form-title { margin-bottom: 1; }
+    .form-error { color: $error; margin-bottom: 1; }
+    .spaced-btn { margin-left: 2; }
     """
 
     def __init__(self, access, existing_row=None):
@@ -148,7 +156,7 @@ class AccessFormScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         title = "Add User" if self.is_new else f"Edit User {self.r.get('telegram_user_id')}"
         with Vertical(id="fbox"):
-            yield Static(f"[b]{title}[/b]", style="margin-bottom: 1;")
+            yield Static(f"[b]{title}[/b]", classes="form-title")
             
             with Horizontal(classes="row"):
                 yield Static("User ID:", classes="label")
@@ -169,8 +177,12 @@ class AccessFormScreen(ModalScreen):
                 
             with Horizontal(classes="row"):
                 yield Static("Access:", classes="label")
-                yield Select([("read", "read")], value=self.r.get("access_level", "read"), 
-                             id="f-access", classes="input", disabled=True)
+                # 'owner' unlocks private fields (notes, CRM, bid targets) in CHAT replies
+                # for that user — the redaction default for everyone else stays 'read'.
+                yield Select([("read", "read"), ("owner", "owner")],
+                             value=self.r.get("access_level", "read"),
+                             id="f-access", classes="input",
+                             disabled=self.is_new)  # new users start at read; edit to raise
                 
             with Horizontal(id="f-msg-box"):
                 yield Static("First Msg:", classes="label")
@@ -184,11 +196,11 @@ class AccessFormScreen(ModalScreen):
                 greet.border_title = "Custom Bot Reply"
                 yield greet
 
-            yield Static("", id="f-error", style="color: red; margin-bottom: 1;")
+            yield Static("", id="f-error", classes="form-error")
             
             with Horizontal(id="f-buttons"):
                 yield Button("Cancel", id="btn-cancel", variant="default")
-                yield Button("Done", id="btn-done", variant="primary", style="margin-left: 2;")
+                yield Button("Done", id="btn-done", variant="primary", classes="spaced-btn")
 
     def on_button_pressed(self, event: Button.Pressed):
         if event.button.id == "btn-cancel":
@@ -317,6 +329,7 @@ class WorkspaceSyncAuditScreen(ModalScreen):
     #sync-audit-title { text-style: bold; }
     #sync-audit-table { height: 1fr; margin: 1 0; }
     #sync-audit-status { height: 2; }
+        .spaced-btn { margin-left: 1; }
     """
     BINDINGS = [("escape", "close", "Close"), ("r", "reload_list", "Refresh")]
 
@@ -332,7 +345,7 @@ class WorkspaceSyncAuditScreen(ModalScreen):
             yield DataTable(id="sync-audit-table", cursor_type="row", zebra_stripes=True, disabled=not self.available)
             with Horizontal():
                 yield Button("Refresh", id="sync-audit-refresh", disabled=not self.available)
-                yield Button("Close", id="sync-audit-close", style="margin-left: 1;")
+                yield Button("Close", id="sync-audit-close", classes="spaced-btn")
 
     def on_mount(self):
         table = self.query_one("#sync-audit-table", DataTable)
@@ -380,6 +393,7 @@ class ContributionReviewScreen(ModalScreen):
     #review-reason { height: 3; }
     #review-buttons { height: 3; align: right middle; }
     #review-status { height: 2; }
+        .spaced-btn { margin-left: 1; }
     """
     BINDINGS = [("escape", "close", "Close"), ("r", "reload_list", "Refresh")]
 
@@ -406,7 +420,7 @@ class ContributionReviewScreen(ModalScreen):
                 yield Button("Publish", id="review-publish", variant="primary", disabled=not self.available)
                 yield Button("Rollback", id="review-rollback", variant="warning", disabled=not self.available)
                 yield Button("Refresh", id="review-refresh", disabled=not self.available)
-                yield Button("Close", id="review-close", style="margin-left: 1;")
+                yield Button("Close", id="review-close", classes="spaced-btn")
 
     def on_mount(self):
         table = self.query_one("#review-queue", DataTable)
@@ -501,8 +515,9 @@ class KashDashboard(App):
         ("c", "focus_chat", "Chat"),
         # r works when the table is focused; f5 / ctrl+r work even while typing in a box.
         ("r", "reload", "Reload"),
-        ("f5", "reload", "Reload"),
-        ("ctrl+r", "reload", "Reload"),
+        # aliases kept but hidden: three "Reload" entries ate a quarter of the footer
+        Binding("f5", "reload", "Reload", show=False),
+        Binding("ctrl+r", "reload", "Reload", show=False),
         ("o", "open_listing", "Open link"),
         ("n", "show_new", "New listings"),
         ("f2", "manage_access", "Bot access"),
