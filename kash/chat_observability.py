@@ -18,6 +18,11 @@ _ALLOWED_ROUTES = {
     "database_aggregate", "database_query", "market_comparison", "math",
     "general_reasoning", "web_research", "clarify", "unavailable", "error",
     "benchmark_unavailable", "empty_result", "pending", "denied", "feedback",
+    # The kinds chat.handle actually emits (the list above predated it): without these,
+    # every successful listing answer was ledgered as route="other" — i.e. the quality
+    # ledger recorded zero successes while counting real clarifies against them.
+    "query", "aggregate", "command", "throttled", "disabled", "empty",
+    "web_unavailable",
 }
 _RELEASE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 

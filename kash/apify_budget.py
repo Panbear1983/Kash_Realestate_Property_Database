@@ -12,8 +12,9 @@ from typing import Optional
 
 LIMITS_URL = "https://api.apify.com/v2/users/me/limits"
 
-# health.assess flags the run once usage crosses this share of the cap.
-WARN_AT = 0.9
+# health.assess flags the run once usage crosses this share of the cap. 0.85 rather than
+# 0.9: at nightly burn the 90% line left no run in which throttling could still help.
+WARN_AT = 0.85
 
 
 def month_to_date(token: Optional[str] = None, request_get=None) -> Optional[dict]:

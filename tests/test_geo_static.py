@@ -24,7 +24,9 @@ ATLANTIC = (40.4000, -73.9000)       # open water
 def _curated():
     if not os.path.exists(DB):
         return []
-    c = sqlite3.connect(DB)
+    # Read-only URI: this is the LIVE production pool, and a bare connect() opens it rw
+    # (holding a write-capable handle on the production WAL during every suite run).
+    c = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
     c.row_factory = sqlite3.Row
     return [dict(r) for r in c.execute(
         "SELECT street_address,neighborhood,latitude,longitude FROM listings "

@@ -108,6 +108,12 @@ def rank_new(store, prefs: dict, limit: Optional[int] = 15, backend=None) -> dic
     # the hand-curated originals (identified by property_id) are the ranking exemplars
     exemplars = [r for r in rows if r.get("property_id") and r.get("tier")][:3]
     new = [r for r in rows if not r.get("tier")]
+    backlog = len(new)
+    # Newest first: store.all() is rowid order, which INSERT OR REPLACE scrambles — the
+    # unsorted slice ranked three-day-old census backfill while TODAY's discoveries
+    # waited, so fresh houses alerted with no tier. The backlog drains either way; the
+    # order decides whether tonight's finds are tiered tonight.
+    new.sort(key=lambda r: r.get("first_seen_date") or "", reverse=True)
     if limit:
         new = new[:limit]
 
@@ -136,4 +142,6 @@ def rank_new(store, prefs: dict, limit: Optional[int] = 15, backend=None) -> dic
         store.update_fields(key, {k: v for k, v in updates.items() if v is not None},
                             allow_protected=True)
         ranked += 1
-    return {"ranked": ranked, "candidates": len(new)}
+    # candidates = the TRUE backlog, not min(limit, backlog): "30/30" two nights running
+    # told the operator nothing about the 75 rows still waiting.
+    return {"ranked": ranked, "candidates": backlog}

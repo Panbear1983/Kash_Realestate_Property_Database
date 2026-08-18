@@ -91,8 +91,10 @@ def test_testing_digest_contains_a_clickable_link_and_onboarding_is_plain_langua
     assert "https://example.com/12-example" in digest
     onboarding = format_onboarding()
     assert "Robo Kash" in onboarding
-    assert "read-only" in onboarding.lower()
-    assert "two-way Telegram" in onboarding
+    # The bot is no longer read-only: onboarding must advertise chat (and never claim
+    # read-only again — both users were told that once and believed it for weeks).
+    assert "read-only" not in onboarding.lower()
+    assert "talk" in onboarding.lower() or "ask" in onboarding.lower()
 
 
 def test_listing_brief_is_deterministic_factual_and_lighthearted():

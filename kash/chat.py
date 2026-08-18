@@ -151,6 +151,7 @@ _FAIL_CLOSED_DROPS = (
     "field_not_available",
     "unsupported_operator",
     "null_value",
+    "empty_value",       # a dropped-for-empty filter silently BROADENED the query before
     "non_scalar_value",
     "non_numeric_value",
     "filter_not_an_object",
@@ -475,14 +476,16 @@ def handle(user_id, name, text, *, store, prefs=None, backend=None,
     # --- more pre-routes (after market_comparison to avoid intercepting comparisons) ---
 
     if _is_show_all_active(message):
-        # Empty filters + status=active, sorted by rank, up to 100 results
+        # "All" must MEAN all: the old limit=100 fetched a quarter of the pool and the
+        # renderer's "…and N more" trailer then undercounted the rest. Fetch everything;
+        # the renderer still shows MAX_ROWS_RENDERED and reports the true remainder.
         spec = reasoning_contract.RouteSpec(
             route=reasoning_contract.DATABASE_QUERY,
             reply="All active listings:",
             filters=[{"field": "status", "op": "=", "value": "active"}],
             sort="rank",
             order="asc",
-            limit=100,
+            limit=2000,
             web_queries=(),
             valid=True,
         )
@@ -524,13 +527,17 @@ def handle(user_id, name, text, *, store, prefs=None, backend=None,
                                spec=spec, backend=None, session_store=session_store)
 
     if _is_new_listings_recent(message):
-        # Active listings with first_seen_date in last N days
+        # Active listings with first_seen_date genuinely in the last N days. The previous
+        # spec only sorted by date while the lead text PROMISED a filtered window — a
+        # wrong answer presented as a filtered one.
         days = _extract_days(message)
-        # Note: relative date filtering not yet in query layer; use wide filter + sort by first_seen_date
+        from datetime import date as _date, timedelta as _timedelta
+        cutoff = (_date.today() - _timedelta(days=days)).isoformat()
         spec = reasoning_contract.RouteSpec(
             route=reasoning_contract.DATABASE_QUERY,
             reply=f"New listings from the last {days} days:",
-            filters=[{"field": "status", "op": "=", "value": "active"}],
+            filters=[{"field": "status", "op": "=", "value": "active"},
+                     {"field": "first_seen_date", "op": ">=", "value": cutoff}],
             sort="first_seen_date",
             order="desc",
             limit=20,

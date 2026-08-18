@@ -91,6 +91,15 @@ def snapshot(db_path: str, keep: int = 14) -> Optional[str]:
             os.remove(old)
         except OSError:
             pass
+    # A snapshot someone opened read-write leaves -wal/-shm sidecars the .db glob can
+    # never prune; a restore of such a pair would replay a stale WAL over the snapshot.
+    survivors = set(glob.glob(os.path.join(d, "pool-*.db")))
+    for side in glob.glob(os.path.join(d, "pool-*.db-*")):
+        if side.rsplit("-", 1)[0] not in survivors:
+            try:
+                os.remove(side)
+            except OSError:
+                pass
     return dest
 
 

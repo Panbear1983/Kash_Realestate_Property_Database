@@ -36,7 +36,7 @@ def classify(listing: dict, prefs: dict) -> Decision:
     if baths < storage_minimum:
         return Decision(False, False, False, ("bath_count_below_storage_minimum",))
 
-    minimum = float(cfg.get("telegram_min_baths", 2.5))
+    minimum = float(cfg.get("telegram_min_baths", 2))
     if baths < minimum:
         return Decision(True, False, False, ("bath_count_below_alert_minimum",))
 

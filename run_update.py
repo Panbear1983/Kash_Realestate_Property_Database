@@ -151,7 +151,10 @@ def main():
     adapters = []
     for n in due:
         cfg = dict((prefs.get("sources") or {}).get(n, {}))
-        if args.limit:
+        # --limit caps the ZILLOW query only. Applied to rentcast it overrode the census's
+        # 500 page size, forcing a 2-page truncated fetch that burned quota AND stopped
+        # ageing (truncated coverage proves nothing).
+        if args.limit and n == "zillow":
             cfg["results_limit"] = args.limit
         adapters.append(REGISTRY[n](config=cfg))
 
@@ -272,6 +275,13 @@ def main():
         if recipients:
             push_telegram(alert_text, recipients)
 
+    # Checkpoint the WAL before closing: the Telegram bridge holds a permanent connection,
+    # so the close-time auto-checkpoint never runs and the WAL had grown to 4x the
+    # database. TRUNCATE resets it whenever no reader is mid-transaction (best effort).
+    try:
+        store.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception:  # noqa: BLE001
+        pass
     store.close()
     if health_report["verdict"] == health.FAILED:
         sys.exit(1)     # so launchd's LastExitStatus means something

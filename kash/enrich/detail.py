@@ -59,7 +59,12 @@ def _needs_detail(r: dict, prefs: Optional[dict] = None) -> bool:
     parsed = urlparse(u)
     host = (parsed.hostname or "").lower()
     is_zillow = host == "zillow.com" or host.endswith(".zillow.com")
-    if not (parsed.scheme == "https" and is_zillow and _slug(u) and not r.get("year_built")):
+    # Sentinel is the description, NOT year_built: the RentCast census fills year_built,
+    # which under the old check made every censused row permanently ineligible for the
+    # detail scrape — 160 live rows had no path to a description, so the description
+    # signals (multigenerational above all) could never fire on them.
+    if not (parsed.scheme == "https" and is_zillow and _slug(u)
+            and not r.get("listing_description")):
         return False
     if prefs:
         from ..notifications import in_alert_scope
@@ -139,6 +144,20 @@ def enrich_details(store, limit: int = 15, prefs: Optional[dict] = None,
         if not key:
             continue
         upd = {k: v for k, v in _normalize(it).items() if v not in (None, "")}
+        existing = store.get(key) or {}
+        # Never clobber merge-recorded price history: the pipeline appends every observed
+        # drop as it happens, while the actor's copy is Zillow's own (differently shaped)
+        # array. Once the row has ANY history, the actor's version stays out.
+        if existing.get("price_history"):
+            upd.pop("price_history", None)
+            upd.pop("original_list_price", None)
+        # Garbage guard: one live row stored original_list_price=748 against a $699,000
+        # asking price. An original below half the current price is not this listing
+        # cycle's number.
+        current_price = existing.get("list_price")
+        if (upd.get("original_list_price") and current_price
+                and upd["original_list_price"] < current_price * 0.5):
+            upd.pop("original_list_price")
         # Upgrade an address URL to the canonical homedetails one so later runs match by zpid
         # directly, and so the link in Telegram points at the real listing page.
         if z and returned_url and _zpid(returned_url):

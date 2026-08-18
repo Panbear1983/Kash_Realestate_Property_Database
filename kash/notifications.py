@@ -81,22 +81,38 @@ def listing_delivery_kind(row: dict) -> str | None:
     return f"listing:{key}:{price}" if price is not None else f"listing:{key}"
 
 
+_TIER_ORDER = {"S": 0, "A": 1, "B": 2, "C": 3, "X": 4}
+_PRIORITY_ORDER = {"now": 0, "soon": 1, "worth": 2, "call": 3, "watch": 4, "skip": 5}
+
+
+def _alert_sort_key(row: dict):
+    """Best first. Unranked rows sit between B and C rather than wherever rowid order
+    happened to put them (a backfill once delivered an X/skip at position 17, ahead of
+    a dozen A-tier homes)."""
+    tier = _TIER_ORDER.get(str(row.get("tier") or "").upper(), 2.5)
+    priority = _PRIORITY_ORDER.get(str(row.get("view_priority") or "").lower(), 2.5)
+    return (tier, priority, row.get("list_price") or 10**9)
+
+
 def unsent_actionable_listings(store, recipient_id: int, prefs: dict) -> list[dict]:
-    """Find alert-ready rows that this recipient has not already received."""
+    """Alert-ready rows this recipient has not received, best first."""
     rows = actionable_listings(store.all(), prefs)
-    return [
+    unsent = [
         row for row in rows
         if (kind := listing_delivery_kind(row)) and not store.notification_sent(recipient_id, kind)
     ]
+    return sorted(unsent, key=_alert_sort_key)
 
 
 def format_onboarding() -> str:
     return (
-        "Robo Kash testing is active. Robo Kash stores qualifying homes for review and sends "
-        "linked alerts only for homes meeting the configured bath minimum with a "
-        "verified safe flood status. "
-        "Telegram is read-only for now; search settings stay in the local dashboard. "
-        "two-way Telegram interaction is planned for a later controlled update."
+        "Robo Kash is active. It watches the whole Staten Island market daily, stores "
+        "qualifying homes, and sends linked alerts for homes that pass the configured "
+        "bath, flood-safety, and price rules — plus a fresh alert when a tracked home "
+        "drops its price. You can TALK to it: ask plain questions like \"which homes are "
+        "in a flood zone\" or \"cheapest 4-bed under 750k\". Contributors can also use "
+        "/mine and /propose to suggest listings for owner review. Search settings live "
+        "in the owner's dashboard."
     )
 
 
@@ -104,7 +120,9 @@ def _price_text(value) -> str:
     return f"${value:,.0f}" if isinstance(value, (int, float)) else "price unavailable"
 
 
-ANALYSIS_CHARS = 110
+# A brief's median length is ~300 chars against a 3,900-char chunk budget; 110 guillotined
+# the curated analysis mid-sentence for no gain.
+ANALYSIS_CHARS = 300
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -144,6 +162,25 @@ def _highlight(row: dict) -> str:
     return " · ".join(parts)
 
 
+def _fresh_days_on_market(row: dict):
+    """days_on_market, aged forward when the source stamp is stale.
+
+    The stored number is only true on the day the source reported it; 35 live rows carried
+    values four weeks old, rendered as-is into briefs. Age it by the days since fetched_at;
+    if that is unknown too, fall back to first_seen_date as a floor.
+    """
+    from datetime import date as _date
+    dom = row.get("days_on_market")
+    stamp = row.get("fetched_at") or row.get("first_seen_date")
+    if dom is None or not stamp:
+        return dom
+    try:
+        elapsed = (_date.today() - _date.fromisoformat(str(stamp)[:10])).days
+    except ValueError:
+        return dom
+    return dom + max(0, elapsed)
+
+
 def format_listing_brief(row: dict) -> str:
     """Render one listing for Telegram.
 
@@ -172,10 +209,15 @@ def format_listing_brief(row: dict) -> str:
         facts.append(f"${row['price_per_sqft']:,}/sqft")
     if row.get("neighborhood"):
         facts.append(str(row["neighborhood"]))
+    if row.get("school_name"):
+        # Populated on 403/404 rows and, for a multigenerational family buyer, part of
+        # the address — it was shown nowhere before.
+        facts.append(str(row["school_name"]))
     if row.get("monthly_piti"):
         facts.append(f"~${row['monthly_piti']:,}/mo")
-    if row.get("days_on_market") is not None:
-        facts.append(f"{row['days_on_market']}d on mkt")
+    dom = _fresh_days_on_market(row)
+    if dom is not None:
+        facts.append(f"{dom}d on mkt")
 
     lines = [f"🤖 {head}"]
     if facts:
@@ -189,7 +231,12 @@ def format_listing_brief(row: dict) -> str:
     elif highlight:
         lines.append(highlight)
 
-    lines.append(f"🔗 {row['listing_url']}")
+    url = row.get("listing_url")
+    if _is_clickable_url(url):
+        lines.append(f"🔗 {url}")
+    else:
+        # The guide's promise: say so rather than invent a link (or render "🔗 None").
+        lines.append("(no listing link on file)")
     return "\n".join(lines)
 
 

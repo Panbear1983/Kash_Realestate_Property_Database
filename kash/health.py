@@ -73,7 +73,8 @@ def assess(result: dict, due_sources: list[str] | None = None) -> dict:
     # The Apify free tier is a HARD monthly cap: past it, actor runs fail rather than bill.
     # Flag while there is still time to throttle (F6 -> zillow results per run).
     budget = result.get("apify_budget")
-    if budget and budget.get("pct", 0) >= 0.9:
+    from .apify_budget import WARN_AT
+    if budget and budget.get("pct", 0) >= WARN_AT:
         problems.append(f"Apify credit {budget['pct'] * 100:.0f}% used "
                         f"(${budget['used']:.2f} of ${budget['cap']:.2f})")
 
