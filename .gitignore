@@ -33,3 +33,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .venv/
+
+# Agent session scratch — never history
+.hermes/
