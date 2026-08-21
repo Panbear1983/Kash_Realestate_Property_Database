@@ -97,6 +97,36 @@ def test_chat_math_short_circuits_model_and_all_database_access():
         assert reply.backend is None
 
 
+def test_math_prefix_with_no_math_signal_falls_through():
+    """'Solve my mortgage question for me' has a trigger word but no math or code signal —
+    it must reach the real router, not dead-end on the arithmetic-only reply."""
+    for text in ("solve my mortgage question for me",
+                "calculate what I can afford",
+                "please calculate my budget for a house",
+                "Compute the value of this house"):
+        assert reasoning_router.route(text) is None, text
+
+
+def test_math_prefix_with_an_empty_remainder_still_claims_math():
+    """'calculate' / 'calculate:' alone is unchanged — asking to compute nothing." """
+    assert reasoning_router.route("calculate") is not None
+    assert reasoning_router.route("calculate:") is not None
+    assert reasoning_router.route("calculate ") is not None
+
+
+def test_a_math_prefix_false_positive_no_longer_short_circuits_as_math():
+    """End-to-end: 'solve my mortgage question for me' has a trigger word but no math
+    signal, so chat.handle must NOT return kind='math' for it — that was the dead end.
+    (It also must not crash: with no real backend available it degrades gracefully to
+    'unavailable', the same outcome any non-command question gets from a dead backend —
+    routing model-bound questions never touches the database until a real spec exists,
+    per this module's own documented security boundary.)"""
+    reply = chat.handle(999, "No DB", "solve my mortgage question for me", store=BombStore(),
+                        prefs=PREFS, backend=BombBackend())
+    assert reply.kind != "math"
+    assert reply.kind == "unavailable"
+
+
 def test_existing_non_math_route_is_unchanged():
     """Non-math still proceeds to the existing access/database boundary."""
     try:

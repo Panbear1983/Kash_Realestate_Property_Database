@@ -82,10 +82,18 @@ class _MathRejected(ValueError):
 def route(text: str) -> Optional[ToolCall]:
     """Return a math call for an unambiguous math candidate, otherwise ``None``.
 
-    Explicit ``calculate``/``compute``/``math``/``solve`` requests are always terminal math
-    candidates, including when their payload is malformed or unsafe. Bare expressions route
-    only when the whole message uses the math alphabet. Suspicious expression-shaped input is
-    also captured so it receives the safe reply rather than reaching a model.
+    Explicit ``calculate``/``compute``/``math``/``solve`` requests are terminal math
+    candidates whenever the remainder actually has a math or code signal — including when
+    that payload is malformed or unsafe, which must still fail closed rather than reach a
+    model. But a trigger word followed by ordinary prose ("solve my mortgage question for
+    me") has no math signal at all; claiming it as math would dead-end a normal question
+    that should reach the database or general router instead, so it falls through to the
+    rest of this function (which itself returns None for it — no listing words, no digits).
+    An EMPTY remainder after the trigger word ("calculate:", "solve ") is still claimed as
+    math, matching the prior behavior of asking to see something computed with nothing to
+    compute. Bare expressions route only when the whole message uses the math alphabet.
+    Suspicious expression-shaped input is also captured so it receives the safe reply
+    rather than reaching a model.
     """
     raw = str(text or "").strip()
     if not raw:
@@ -93,7 +101,11 @@ def route(text: str) -> Optional[ToolCall]:
 
     match = _PREFIX.match(raw)
     if match:
-        return ToolCall(MATH_TOOL, raw[match.end():].strip().rstrip("?").strip())
+        expression = raw[match.end():].strip().rstrip("?").strip()
+        if expression and not (_has_math_signal(expression)
+                               or _looks_unsafe_expression(expression)):
+            return None   # trigger word matched, but no math or code signal follows
+        return ToolCall(MATH_TOOL, expression)
 
     match = _WHAT_IS.match(raw)
     if match:

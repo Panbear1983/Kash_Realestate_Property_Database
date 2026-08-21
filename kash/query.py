@@ -25,7 +25,7 @@ def _cast(field: str, value):
     return value
 
 
-def build(filters, sort: Optional[str], order: str, limit: int):
+def _where(filters) -> tuple[list[str], list]:
     where, params = [], []
     for f in filters:
         field, op, val = f["field"], f.get("op", "="), f["value"]
@@ -40,6 +40,11 @@ def build(filters, sort: Optional[str], order: str, limit: int):
         else:
             where.append(f'"{field}" {sop} ?')
             params.append(_cast(field, val))
+    return where, params
+
+
+def build(filters, sort: Optional[str], order: str, limit: int):
+    where, params = _where(filters or [])
     sql = "SELECT * FROM listings"
     if where:
         sql += " WHERE " + " AND ".join(where)
@@ -59,6 +64,56 @@ def build(filters, sort: Optional[str], order: str, limit: int):
 def run(store, filters=None, sort: str = "rank", order: str = "asc", limit: int = 20):
     sql, params = build(filters or [], sort, order, limit)
     return store.execute_select(sql, params)
+
+
+def build_count(filters) -> tuple[str, list]:
+    """Same WHERE-clause construction as build(); a count is invariant to sort/limit."""
+    where, params = _where(filters or [])
+    sql = "SELECT COUNT(*) AS n FROM listings"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    return sql, params
+
+
+def count(store, filters=None) -> int:
+    sql, params = build_count(filters)
+    rows = store.aggregate_select(sql, params)
+    return int(rows[0]["n"]) if rows else 0
+
+
+MAX_DIAGNOSIS_FILTERS = 6
+MAX_DIAGNOSIS_SUGGESTIONS = 2
+_OP_WORDS = {"=": "=", "!=": "≠", "<": "<", "<=": "≤", ">": ">", ">=": "≥",
+            "contains": "contains"}
+
+
+def describe_filter(f: dict) -> str:
+    op = f.get("op")
+    return f"{f.get('field')} {_OP_WORDS.get(op, op)} {f.get('value')}"
+
+
+def diagnose_empty(store, filters: list[dict], *, max_filters: int = MAX_DIAGNOSIS_FILTERS,
+                   max_suggestions: int = MAX_DIAGNOSIS_SUGGESTIONS) -> list[tuple[dict, int]]:
+    """For a filtered search that returned zero rows: which SINGLE filter, if dropped
+    alone, would unlock the most matches. COUNT-only — never a second row-returning query,
+    so this cannot show any row content beyond what the user already asked for and got
+    zero of. Bounded to `max_filters` extra COUNT queries so a spec with many filters
+    degrades to no diagnosis rather than a query-count explosion. Returns up to
+    `max_suggestions` filters, best (highest unlocked count) first, among those that
+    individually yield > 0 rows if dropped alone."""
+    if not filters or len(filters) > max_filters:
+        return []
+    found = []
+    for i in range(len(filters)):
+        remaining = filters[:i] + filters[i + 1:]
+        try:
+            n = count(store, remaining)
+        except Exception:  # noqa: BLE001 - diagnosis is best-effort, never fatal
+            continue
+        if n > 0:
+            found.append((filters[i], n))
+    found.sort(key=lambda pair: pair[1], reverse=True)
+    return found[:max_suggestions]
 
 
 def parse_filters(tokens) -> list[dict]:

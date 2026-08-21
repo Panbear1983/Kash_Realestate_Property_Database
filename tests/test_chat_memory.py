@@ -42,8 +42,11 @@ def _setup():
 
 
 class FakeBackend:
-    """Returns one scripted route spec, shaped exactly as the contract requires."""
+    """Returns one scripted route spec, shaped exactly as the contract requires. Records
+    every prompt it was asked, so a test can inspect what context the router saw."""
     name = "fake"
+    chosen = "fake"
+    last_usage = None
 
     def __init__(self, **spec_over):
         base = {k: None for k in reasoning_contract.ROUTE_SCHEMA["required"]}
@@ -51,11 +54,13 @@ class FakeBackend:
                      "order": "asc", "limit": 20, "web_queries": []})
         base.update(spec_over)
         self.spec = base
+        self.prompts = []
 
     def available(self):
         return True, ""
 
     def query_spec(self, prompt, schema):
+        self.prompts.append(prompt)
         return dict(self.spec)
 
 
@@ -151,6 +156,64 @@ def test_an_expired_session_falls_open_to_a_normal_query():
     reply = chat.handle(USER, "Tester", "the second one", store=store, prefs=PREFS,
                         backend=FakeBackend(), session_store=expired)
     assert reply.kind == "clarify", "expired memory must not answer"
+
+
+# --- modification-aware follow-ups: the prior filter list becomes router context -----------
+# ("actually make that under 700k" with no anaphor at all — Design E)
+
+def test_saved_session_carries_real_filters_not_just_sort():
+    store, sessions = _setup()
+    ask(store, sessions, "show all active listings")
+    assert sessions.load(USER)["filters"] == [{"field": "status", "op": "=", "value": "active"}]
+
+
+def test_a_modification_message_gets_prior_filters_as_router_context():
+    store, sessions = _setup()
+    ask(store, sessions, "show all active listings")
+    backend = FakeBackend(route="database_query", reply="Under 700k:",
+                          filters=[{"field": "list_price", "op": "<=", "value": 700000}])
+    ask(store, sessions, "actually make that under 700k", backend=backend)
+    assert len(backend.prompts) == 1
+    assert "status = active" in backend.prompts[0]
+    assert "OPTIONAL background" in backend.prompts[0]
+
+
+def test_a_plain_new_question_still_gets_context_the_model_may_ignore():
+    """Context is injected regardless of phrasing (no anaphor needed) — safety comes from
+    it being explicitly optional in the prompt, not from withholding it."""
+    store, sessions = _setup()
+    ask(store, sessions, "show all active listings")
+    backend = FakeBackend(route="database_query", reply="Cheapest first:",
+                          filters=[], sort="list_price")
+    ask(store, sessions, "what's the cheapest thing you've got", backend=backend)
+    assert "status = active" in backend.prompts[0]
+    assert "ignore this context completely" in backend.prompts[0]
+
+
+def test_stale_session_context_is_not_injected_after_five_minutes():
+    """A separate, SHORTER freshness window than the 30-minute session TTL — the ordinal-
+    pick feature keeps working for the full 30 minutes; unprompted context stops much
+    sooner. Unit-tested directly against _followup_context since chat.handle has no
+    injectable clock for session freshness."""
+    ttl = 1800
+    saved_at = 1_000_000.0
+    sess = {"filters": [{"field": "status", "op": "=", "value": "active"}],
+            "expires_at": saved_at + ttl, "listing_keys": ("a",)}
+
+    fresh = chat._followup_context(sess, ttl, now=saved_at + 60)
+    assert "status = active" in fresh
+
+    boundary = chat._followup_context(sess, ttl, now=saved_at + chat._FOLLOWUP_CONTEXT_TTL_SECONDS)
+    assert "status = active" in boundary
+
+    stale = chat._followup_context(sess, ttl, now=saved_at + chat._FOLLOWUP_CONTEXT_TTL_SECONDS + 1)
+    assert stale == ""
+
+
+def test_followup_context_is_empty_with_no_session_or_no_filters():
+    assert chat._followup_context(None, 1800) == ""
+    assert chat._followup_context({"filters": [], "expires_at": 1000}, 1800, now=500) == ""
+    assert chat._followup_context({"filters": None, "expires_at": 1000}, 1800, now=500) == ""
 
 
 if __name__ == "__main__":

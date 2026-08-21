@@ -61,6 +61,10 @@ class ReadOnlyStore:
         """Expose the fixed all-status aggregate; no caller-controlled SQL is accepted."""
         return self._store.overall_price_summary()
 
+    def aggregate_select(self, sql: str, params=()) -> list[dict]:
+        """Expose bounded, code-built aggregate reads — see Store.aggregate_select."""
+        return self._store.aggregate_select(sql, params)
+
     def __repr__(self) -> str:
         return f"ReadOnlyStore({self._store!r})"
 
@@ -109,6 +113,10 @@ class _Reader:
             "FROM listings WHERE list_price IS NOT NULL"
         ).fetchone()
         return dict(row)
+
+    def aggregate_select(self, sql: str, params=()) -> list[dict]:
+        rows = self.conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
 
 
 def open_readonly(db_path: str) -> ReadOnlyStore:

@@ -53,10 +53,20 @@ HELP = (
 )
 
 
-def _render(rows: list[dict], level: str, header: str) -> str:
+def _render(rows: list[dict], level: str, header: str, *, ro=None, filters=None) -> str:
     """Shared row rendering: redact, cap, reuse the existing brief formatter."""
     if not rows:
-        return "Nothing matches that one — want to loosen it a bit?"
+        base = "Nothing matches that one — want to loosen it a bit?"
+        if ro is not None and filters:
+            diagnosis = query.diagnose_empty(ro, filters)
+            if diagnosis:
+                lines = [base]
+                for f, n in diagnosis:
+                    word = "home" if n == 1 else "homes"
+                    lines.append(f"Dropping {query.describe_filter(f)} would show "
+                                f"{n} {word} — want me to?")
+                return "\n".join(lines)
+        return base
     shown = rows[:chat_policy.MAX_ROWS_RENDERED]
     lines = [header.format(n=len(rows), shown=len(shown))]
     lines += [format_listing_brief(r) for r in chat_policy.redact_rows(shown, level)]
@@ -109,7 +119,8 @@ def _cmd_filter(args: str, ctx: Context) -> str:
         return f"I can't filter on that. ({'; '.join(safe.dropped[:2])})"
     rows = query.run(ctx.ro, filters=safe.filters, sort=safe.sort,
                      order=safe.order, limit=safe.limit)
-    return _render(rows, ctx.access_level, "{n} match — showing {shown}:")
+    return _render(rows, ctx.access_level, "{n} match — showing {shown}:",
+                   ro=ctx.ro, filters=safe.filters)
 
 
 def _cmd_show(args: str, ctx: Context) -> str:

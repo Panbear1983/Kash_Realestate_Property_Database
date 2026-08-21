@@ -16,18 +16,25 @@ def _store():
     return directory, SessionStore(os.path.join(directory.name, "sessions.sqlite"), ttl_seconds=1800)
 
 
+def _f(field, op, value):
+    return {"field": field, "op": op, "value": value}
+
+
 def test_private_sessions_are_isolated_and_store_structured_state_only():
+    """filters is the real SafeSpec shape — a list of {field,op,value} dicts, the same
+    shape kash.chat_policy.sanitize_spec produces — not an arbitrary flat dict. That old
+    shape was never populated by any production caller (dead code)."""
     directory, sessions = _store()
     try:
-        sessions.save(101, filters={"status": "active", "max_price": 750000},
+        sessions.save(101, filters=[_f("status", "=", "active"), _f("list_price", "<=", "750000")],
                       listing_keys=["a", "b"], selected_key="a", raw_text=PRIVATE_TEXT, now=100)
-        sessions.save(202, filters={"status": "active", "neighborhood": "Great Kills"},
+        sessions.save(202, filters=[_f("status", "=", "active"), _f("neighborhood", "=", "Great Kills")],
                       listing_keys=["c"], now=100)
         first = sessions.load(101, now=101)
         second = sessions.load(202, now=101)
         assert first["listing_keys"] == ("a", "b") and first["selected_key"] == "a"
         assert second["listing_keys"] == ("c",) and second["selected_key"] is None
-        assert first["filters"] == {"status": "active", "max_price": 750000}
+        assert first["filters"] == [_f("status", "=", "active"), _f("list_price", "<=", "750000")]
         assert PRIVATE_TEXT.encode() not in open(sessions.path, "rb").read()
     finally:
         directory.cleanup()
@@ -38,7 +45,7 @@ def test_search_result_state_keeps_only_match_keys_not_listing_rows():
     try:
         rows = [{"match_key": "safe-a", "street_address": "PRIVATE 123 MAIN"},
                 {"match_key": "safe-b", "my_notes": "PRIVATE NOTE"}]
-        sessions.save_search(101, filters={"status": "active"}, rows=rows, now=100)
+        sessions.save_search(101, filters=[_f("status", "=", "active")], rows=rows, now=100)
         state = sessions.load(101, now=101)
         assert state["listing_keys"] == ("safe-a", "safe-b")
         blob = open(sessions.path, "rb").read()
@@ -50,12 +57,42 @@ def test_search_result_state_keeps_only_match_keys_not_listing_rows():
 def test_expired_or_cleared_session_is_unavailable_to_its_owner_only():
     directory, sessions = _store()
     try:
-        sessions.save(101, filters={"status": "active"}, listing_keys=["a"], now=100)
-        sessions.save(202, filters={"status": "active"}, listing_keys=["b"], now=100)
+        sessions.save(101, filters=[_f("status", "=", "active")], listing_keys=["a"], now=100)
+        sessions.save(202, filters=[_f("status", "=", "active")], listing_keys=["b"], now=100)
         assert sessions.load(101, now=1901) is None
         assert sessions.load(202, now=101)["listing_keys"] == ("b",)
         assert sessions.clear(202)
         assert sessions.load(202, now=101) is None
+    finally:
+        directory.cleanup()
+
+
+def test_private_or_owner_only_filters_are_never_persisted():
+    """A filter on a PRIVATE_FIELDS column must be dropped at the storage boundary — the
+    routing prompt is always built at 'read' level regardless of who is actually asking,
+    so a private field name must never round-trip back into a later prompt."""
+    directory, sessions = _store()
+    try:
+        sessions.save(101, filters=[_f("status", "=", "active"), _f("my_notes", "contains", "x"),
+                                    _f("analysis", "contains", "y")],
+                      listing_keys=["a"], now=100)
+        state = sessions.load(101, now=101)
+        assert state["filters"] == [_f("status", "=", "active")]
+    finally:
+        directory.cleanup()
+
+
+def test_stored_filter_count_and_shape_are_bounded():
+    directory, sessions = _store()
+    try:
+        many = [_f("status", "=", "active")] * 10
+        sessions.save(101, filters=many, listing_keys=["a"], now=100)
+        assert len(sessions.load(101, now=101)["filters"]) == 8
+
+        junk = [_f("status", "=", "active"), "not-a-dict", {"field": "status"},
+                {"field": "status", "op": "=", "value": ["list", "value"]}]
+        sessions.save(202, filters=junk, listing_keys=["b"], now=100)
+        assert sessions.load(202, now=101)["filters"] == [_f("status", "=", "active")]
     finally:
         directory.cleanup()
 

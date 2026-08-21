@@ -10,7 +10,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from kash import chat, chat_policy, reasoning_contract      # noqa: E402
+from kash import chat, chat_policy, chat_vocabulary, reasoning_contract  # noqa: E402
 from kash.access import Access                              # noqa: E402
 from kash.chat_sessions import SessionStore                # noqa: E402
 from kash.store import Store                                # noqa: E402
@@ -93,6 +93,11 @@ def _store(rows=3):
 
 def _ask(text, user_id=ALLOWED, store=None, backend=None, prefs=None, name="Tester"):
     chat.reset_throttle()
+    # The vocabulary cache is module-level and refreshed opportunistically by whichever
+    # test happens to touch the database first — without a reset, an EARLIER test's fixture
+    # (a different average price, different neighborhoods) leaks into a LATER test's
+    # prompt-content assertions depending on run order.
+    chat_vocabulary.reset_cache()
     store = store or _store()
     backend = backend or FakeBackend()
     reply = chat.handle(user_id, name, text, store=store,
@@ -298,14 +303,32 @@ def test_a_raising_backend_never_leaks_a_traceback():
 
 def test_a_backend_returning_junk_does_not_crash():
     for junk in (None, "not a dict", 42, {}):
-        reply, _, _ = _ask("anything", backend=FakeBackend(junk))
+        reply, _, backend = _ask("anything", backend=FakeBackend(junk))
         assert reply.kind == "clarify", junk
+        # One bounded repair retry: the first malformed reply, then one corrective retry
+        # (which, from this FakeBackend, returns the same junk) — never a loop.
+        assert backend.calls == 2, junk
 
 
 def test_no_matches_gets_a_helpful_reply():
     reply, _, _ = _ask("anything", backend=FakeBackend(
         _spec(filters=[{"field": "zip", "op": "=", "value": "99999"}])))
     assert reply.kind == "empty_result"
+    # One filter, dropped alone, unlocks the whole 3-row fixture — the diagnosis names it
+    # rather than falling back to the generic "nothing matches" line.
+    assert "Dropping zip = 99999 would show 3 homes" in reply.text
+
+
+def test_an_undiagnosable_empty_result_falls_back_to_examples():
+    """More filters than the diagnosis bound (or none of them individually unlock a row)
+    gets the generic message, still non-empty, never a crash."""
+    reply, _, _ = _ask("anything", backend=FakeBackend(_spec(
+        filters=[{"field": "zip", "op": "=", "value": "99999"},
+                {"field": "beds", "op": ">=", "value": "99"}])))
+    assert reply.kind == "empty_result"
+    assert "Dropping" not in reply.text, \
+        "neither filter unlocks a row on its own (zip AND beds both fail), so no suggestion"
+    assert reply.text.strip()
 
 
 # --- throttling --------------------------------------------------------------------------------------------

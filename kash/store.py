@@ -193,6 +193,21 @@ class Store:
         ).fetchone()
         return dict(row)
 
+    def aggregate_select(self, sql: str, params=()) -> list[dict]:
+        """Run a read-only, code-built aggregate query (COUNT/GROUP BY) and return rows
+        shaped by the query's own column aliases — NOT decoded against the full listing
+        schema the way execute_select is. A COUNT or GROUP BY result doesn't carry every
+        FIELD_ORDER column, so execute_select's `r[f] for f in FIELD_ORDER` raises
+        IndexError on it.
+
+        Callers build `sql` from a fixed set of trusted field names (kash.query,
+        kash.chat_vocabulary), never from raw user text, and every value is still bound as
+        a parameter. Returns aggregate numbers/labels only — never a listing's row content
+        — the same exposure as price_summary above, not the exposure of a row read.
+        """
+        rows = self.conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
     def execute_select(self, sql: str, params=()) -> list[dict]:
         """Run a SELECT * built by kash.query and decode rows to schema dicts."""
         rows = self.conn.execute(sql, params).fetchall()

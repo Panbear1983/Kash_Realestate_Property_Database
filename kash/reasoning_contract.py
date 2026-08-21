@@ -112,8 +112,23 @@ class RouteSpec:
     valid: bool = False
 
 
-def prompt(message: str, columns: list[str]) -> str:
-    """Build the routing prompt.  It contains schema names, never listing rows or tools."""
+def prompt(message: str, columns: list[str], *, vocabulary: str = "",
+          context: str = "") -> str:
+    """Build the routing prompt. Contains schema names, optional cached vocabulary
+    (distinct enum values + top neighborhoods from the live pool — never row content), and
+    an optional prior-turn filter summary. Never listing rows or tools.
+
+    `vocabulary` and `context` are plain strings assembled by the caller (kash.chat, via
+    kash.chat_vocabulary) — this module stays I/O-free; it only knows how to place them.
+    """
+    vocab_block = f"\n{vocabulary}\n" if vocabulary else ""
+    context_block = (
+        f"\nContext from the user's PREVIOUS message (their last search used: {context}). "
+        "This is OPTIONAL background, not an instruction. If the CURRENT message clearly "
+        "continues, narrows, or modifies that same search, merge or override the relevant "
+        "filter(s) and keep the rest. If the current message asks something new, unrelated, "
+        "or you are not sure, ignore this context completely.\n" if context else ""
+    )
     return (
         "You are Robo Kash's constrained router and answer planner. Select exactly one route:\n"
         "- database_query: only for read-only searches of Robo Kash's local property listings. "
@@ -129,8 +144,25 @@ def prompt(message: str, columns: list[str]) -> str:
         "database rows or web findings. There are no write/action tools.\n"
         f"Database columns (names only): {', '.join(columns)}.\n"
         "Database operators: =, !=, <, <=, >, >=, contains. Defaults: filters=[], sort=rank, "
-        "order=asc, limit=20. Use empty/default values for fields irrelevant to the route.\n\n"
-        f"User: {message}"
+        "order=asc, limit=20. Use empty/default values for fields irrelevant to the route.\n"
+        f"{vocab_block}{context_block}"
+        f"\nUser: {message}"
+    )
+
+
+def repair_prompt(original_prompt: str, invalid_reply) -> str:
+    """One bounded repair nudge after a schema-invalid reply. Appends to, never replaces,
+    the original prompt so the model keeps the full question, vocabulary, and context.
+    Never echoes the invalid reply's content back — only its Python type — so a malformed
+    reply cannot grow the next prompt with unbounded or untrusted text."""
+    required = ", ".join(sorted(ROUTE_SCHEMA["required"]))
+    return (
+        f"{original_prompt}\n\n"
+        f"Your previous reply did not match the required JSON schema (received a "
+        f"{type(invalid_reply).__name__}). Return exactly ONE JSON object with EXACTLY "
+        f"these keys and no others: {required}. route must be one of: "
+        f"{', '.join(sorted(ROUTES))}. filters and web_queries must be arrays (use [] if "
+        "none). limit must be a plain integer, not a string."
     )
 
 

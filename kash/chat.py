@@ -40,6 +40,7 @@ from . import (
     brave_search,
     chat_policy,
     chat_sessions,
+    chat_vocabulary,
     commands,
     llm,
     local_aggregates,
@@ -103,9 +104,11 @@ def _throttled(user_id: int, per_minute: int, now: float) -> bool:
 
 # --- prompt -----------------------------------------------------------------------------------
 
-def _prompt(message: str, allowed: list[str]) -> str:
+def _prompt(message: str, allowed: list[str], *, vocabulary: str = "",
+           context: str = "") -> str:
     """Compatibility wrapper for the Phase 3 route prompt."""
-    return reasoning_contract.prompt(message, allowed)
+    return reasoning_contract.prompt(message, allowed, vocabulary=vocabulary,
+                                     context=context)
 
 
 def _visible_columns(access_level: str) -> list[str]:
@@ -131,6 +134,22 @@ def _render_rows(rows: list[dict], lead: str, level: str) -> str:
     if len(rows) > len(shown):
         lines.append(f"…and {len(rows) - len(shown)} more. Narrow it down to see the rest.")
     return "\n".join(lines)
+
+
+def _empty_result_reply(lead: str, diagnosis: list[tuple[dict, int]]) -> str:
+    """Zero rows, explained: which single filter (if any) is the binding constraint,
+    COUNT-only so this never leaks a second row-returning query's worth of content."""
+    base = lead or "Nothing matches that exact combination."
+    if not diagnosis:
+        examples = chat_vocabulary.peek_examples()
+        if examples:
+            base += " Try, for example: " + "; ".join(examples) + "."
+        return chat_policy.clamp_reply(base)
+    lines = [base]
+    for f, n in diagnosis:
+        word = "home" if n == 1 else "homes"
+        lines.append(f"Dropping {query.describe_filter(f)} would show {n} {word} — want me to?")
+    return chat_policy.clamp_reply("\n".join(lines))
 
 
 # --- access -------------------------------------------------------------------------------------
@@ -173,6 +192,32 @@ _FOLLOWUP = re.compile(
 _ORDINAL_RE = re.compile(r"\bthe (first|second|third|fourth|fifth|last) one\b|#(\d+)\b",
                          re.IGNORECASE)
 _ORDINALS = {"first": 0, "second": 1, "third": 2, "fourth": 3, "fifth": 4, "last": -1}
+
+_FOLLOWUP_CONTEXT_TTL_SECONDS = 300   # a separate, SHORTER freshness window than the
+    # session's own 30-minute TTL: message adjacency alone is a weaker signal than an
+    # explicit anaphor ("the second one", which still gets the full 30 minutes), so
+    # replaying filters as unprompted router context stops well before the session itself
+    # expires.
+
+
+def _followup_context(sess, ttl_seconds: int, *, now: Optional[float] = None) -> str:
+    """Render the previous message's filters as OPTIONAL context for the router — only
+    while the session is fresher than _FOLLOWUP_CONTEXT_TTL_SECONDS."""
+    if not sess:
+        return ""
+    filters = sess.get("filters")
+    if not isinstance(filters, list) or not filters:
+        return ""
+    expires_at = sess.get("expires_at")
+    if not isinstance(expires_at, (int, float)):
+        return ""
+    now = time.time() if now is None else now
+    age = (ttl_seconds or 1800) - (expires_at - now)
+    if age < 0 or age > _FOLLOWUP_CONTEXT_TTL_SECONDS:
+        return ""
+    parts = [f"{f.get('field')} {f.get('op')} {f.get('value')}" for f in filters
+             if isinstance(f, dict) and f.get("field") and f.get("op")]
+    return "; ".join(parts)
 
 
 def _session_key(row: dict):
@@ -221,7 +266,7 @@ def _followup_pick(user_id: int, *, store, keys, index: int,
     picked = rows[index]
     if session_store is not None:
         try:
-            session_store.save(user_id, filters={}, listing_keys=list(keys),
+            session_store.save(user_id, filters=[], listing_keys=list(keys),
                                selected_key=_session_key(picked))
         except Exception:  # noqa: BLE001 — memory must never block an answer
             pass
@@ -232,10 +277,14 @@ def _followup_pick(user_id: int, *, store, keys, index: int,
 def _database_reply(user_id: int, name, message: str, *, store, prefs: dict,
                     spec: reasoning_contract.RouteSpec | None, backend,
                     session_store: chat_sessions.SessionStore | None = None,
-                    followup_keys=None) -> Reply:
+                    followup_keys=None, pending_usage=None) -> Reply:
     """The only Phase 3 branch allowed to construct database-facing objects."""
     access = Access(store)
     ro = ReadOnlyStore(store)
+    # Best-effort: warms the routing-prompt vocabulary cache for the NEXT message. Never
+    # raises, never blocks THIS answer — see kash.chat_vocabulary's module docstring for
+    # why this is the only call site allowed to do it.
+    chat_vocabulary.maybe_refresh(ro, prefs)
 
     if not access.is_allowed(user_id):
         first_contact = _known(access, user_id) is None
@@ -261,10 +310,20 @@ def _database_reply(user_id: int, name, message: str, *, store, prefs: dict,
         return _split(answered, "command")
 
     if spec is None:
-        return _split(reasoning_contract.SAFE_CLARIFY, "clarify")
+        return _split(chat_vocabulary.safe_clarify_with_examples(), "clarify")
 
     # Durable metering is intentionally limited to this database branch. General and web
     # cannot write usage without violating their no-database contract.
+    if pending_usage is not None:
+        # The wasted first call from a repair-retry sequence — only ever reaches here
+        # (and so only ever reaches `store`) once the FINAL route is confirmed to be
+        # database_query. See handle()'s routing tail for why this can't be recorded
+        # any earlier.
+        pending_chosen, pending_last_usage = pending_usage
+        if pending_chosen is not None:
+            from .usage import Usage
+            Usage(store).record(user_id, pending_chosen, job="chat_invalid",
+                                usage=pending_last_usage)
     nl.record_usage(store, backend, user_id, job="chat")
     chosen = getattr(backend, "chosen", None)
     safe = chat_policy.sanitize_spec({
@@ -274,7 +333,7 @@ def _database_reply(user_id: int, name, message: str, *, store, prefs: dict,
         "limit": spec.limit,
     }, level)
     if any(reason.startswith(_FAIL_CLOSED_DROPS) for reason in safe.dropped):
-        return _split(reasoning_contract.SAFE_CLARIFY, "clarify",
+        return _split(chat_vocabulary.safe_clarify_with_examples(), "clarify",
                       backend=chosen, dropped=safe.dropped)
 
     reply = chat_policy.clamp_reply(spec.reply)
@@ -285,8 +344,9 @@ def _database_reply(user_id: int, name, message: str, *, store, prefs: dict,
         return _split("I built a query I couldn't run. Try rephrasing?", "error",
                       backend=chosen, dropped=safe.dropped)
     if not rows:
-        return _split(reply or "Nothing matches that one — want to loosen it a bit?",
-                      "empty_result", backend=chosen, dropped=safe.dropped)
+        diagnosis = query.diagnose_empty(ro, safe.filters)
+        return _split(_empty_result_reply(reply, diagnosis), "empty_result",
+                      backend=chosen, dropped=safe.dropped)
     lead = reply or f"{len(rows)} match:"
     if followup_keys:
         keep = {str(k) for k in followup_keys}
@@ -298,7 +358,7 @@ def _database_reply(user_id: int, name, message: str, *, store, prefs: dict,
             lead = f"{lead} (none of your last list matched; showing the whole pool)"
     if session_store is not None:
         try:
-            session_store.save_search(user_id, filters={"sort": safe.sort}, rows=rows)
+            session_store.save_search(user_id, filters=safe.filters, rows=rows)
         except Exception:
             # Session convenience can never block or alter a database answer.
             pass
@@ -310,7 +370,7 @@ def _web_reply(message: str, spec: reasoning_contract.RouteSpec, *, backend,
                provider) -> Reply:
     """Research current facts using only a bounded injected provider."""
     if not reasoning_contract.web_is_justified(message):
-        return _split(reasoning_contract.SAFE_CLARIFY, "clarify")
+        return _split(chat_vocabulary.safe_clarify_with_examples(), "clarify")
 
     provider = provider if provider is not None else brave_search.provider_from_env()
     bundle = web_research.collect(provider, spec.web_queries or (message,))
@@ -519,22 +579,30 @@ def handle(user_id, name, text, *, store, prefs=None, backend=None,
     if _throttled(user_id, int(cfg.get("rate_limit_per_minute", DEFAULT_RATE_PER_MINUTE)), now):
         return Reply(texts=("Easy there — give me a minute to catch up.",), kind="throttled")
 
-    # Follow-up memory: an anaphor ("those", "#2") plus a live session scopes this message
-    # to the last result set. Detection failing open to a normal query is the safe default.
+    # Session is loaded ONCE, unconditionally — a cheap local disk read, not LLM-gated —
+    # and feeds two independent things: (1) an anaphor ("those", "#2") triggers the
+    # zero-model ordinal-pick fast path below; (2) regardless of any anaphor, a fresh
+    # session's filters become OPTIONAL context for the router tail, so "actually make
+    # that under 700k" works without any special phrasing. Detection failing open to a
+    # normal query is the safe default in both cases.
     followup_keys = None
-    if session_store is not None and _FOLLOWUP.search(message):
+    followup_context = ""
+    sess = None
+    if session_store is not None:
         try:
             sess = session_store.load(user_id)
         except Exception:  # noqa: BLE001 — memory must never block an answer
             sess = None
-        if sess and sess.get("listing_keys"):
-            followup_keys = tuple(sess["listing_keys"])
-            index = _ordinal_index(message)
-            if index is not None:
-                picked = _followup_pick(user_id, store=store, keys=followup_keys,
-                                        index=index, session_store=session_store)
-                if picked is not None:
-                    return picked
+        followup_context = _followup_context(sess, getattr(session_store, "ttl_seconds", 1800))
+
+    if sess and sess.get("listing_keys") and _FOLLOWUP.search(message):
+        followup_keys = tuple(sess["listing_keys"])
+        index = _ordinal_index(message)
+        if index is not None:
+            picked = _followup_pick(user_id, store=store, keys=followup_keys,
+                                    index=index, session_store=session_store)
+            if picked is not None:
+                return picked
 
     # Recognition is pure; only a confirmed command may enter the database branch.
     if commands.is_command(message):
@@ -655,26 +723,45 @@ def handle(user_id, name, text, *, store, prefs=None, backend=None,
     if not ok:
         return _split("I can't reach a model right now — try again shortly.", "unavailable")
 
+    prompt_text = _prompt(message, _visible_columns("read"),
+                          vocabulary=chat_vocabulary.peek_prompt_block(),
+                          context=followup_context)
     try:
-        raw = backend.query_spec(
-            _prompt(message, _visible_columns("read")),
-            reasoning_contract.ROUTE_SCHEMA,
-        )
+        raw = backend.query_spec(prompt_text, reasoning_contract.ROUTE_SCHEMA)
     except Exception:  # noqa: BLE001 - never leak a traceback
         return _split("I couldn't work that one out — mind rephrasing?", "error")
 
     spec = reasoning_contract.parse(raw)
+    pending_usage = None
     if not spec.valid:
-        return _split(reasoning_contract.SAFE_CLARIFY, "clarify")
+        # A malformed reply already cost real quota — but general_reasoning/web_research
+        # must never touch `store` (tests prove this with store=Bomb()), and we don't yet
+        # know which route the retry will land on. So the wasted call's usage is snapshotted
+        # here (before the retry overwrites backend.chosen/last_usage) and only actually
+        # recorded later, from _database_reply, if the FINAL route turns out to be
+        # database_query — the one route already allowed to touch store. If the retry ends
+        # up general_reasoning/web_research/clarify, this snapshot is simply dropped,
+        # matching the pre-existing (unrelated) gap where those routes are never metered.
+        pending_usage = (getattr(backend, "chosen", None), getattr(backend, "last_usage", None))
+        try:
+            raw = backend.query_spec(
+                reasoning_contract.repair_prompt(prompt_text, raw),
+                reasoning_contract.ROUTE_SCHEMA,
+            )
+            spec = reasoning_contract.parse(raw)
+        except Exception:  # noqa: BLE001 - never leak a traceback
+            spec = reasoning_contract.RouteSpec()
+        if not spec.valid:
+            return _split(chat_vocabulary.safe_clarify_with_examples(), "clarify")
     if spec.route == reasoning_contract.CLARIFY:
         return _split(chat_policy.clamp_reply(spec.reply)
-                      or reasoning_contract.SAFE_CLARIFY, "clarify")
+                      or chat_vocabulary.safe_clarify_with_examples(), "clarify")
     if spec.route == reasoning_contract.GENERAL_REASONING:
         reply = chat_policy.clamp_reply(spec.reply)
-        return _split(reply or reasoning_contract.SAFE_CLARIFY, "general_reasoning",
-                      backend=getattr(backend, "chosen", None))
+        return _split(reply or chat_vocabulary.safe_clarify_with_examples(),
+                      "general_reasoning", backend=getattr(backend, "chosen", None))
     if spec.route == reasoning_contract.WEB_RESEARCH:
         return _web_reply(message, spec, backend=backend, provider=web_provider)
     return _database_reply(user_id, name, message, store=store, prefs=prefs,
                            spec=spec, backend=backend, session_store=session_store,
-                           followup_keys=followup_keys)
+                           followup_keys=followup_keys, pending_usage=pending_usage)

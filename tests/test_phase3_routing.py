@@ -5,9 +5,13 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from kash import chat, reasoning_contract as rc, web_research as wr  # noqa: E402
+import tempfile
+
+from kash import chat, chat_vocabulary, reasoning_contract as rc, web_research as wr  # noqa: E402
 from kash.access import Access                                       # noqa: E402
+from kash.chat_sessions import SessionStore                         # noqa: E402
 from kash.store import Store                                         # noqa: E402
+from kash.usage import Usage                                         # noqa: E402
 
 PREFS = {"chat": {"enabled": True, "rate_limit_per_minute": 20}}
 USER = 7001
@@ -259,11 +263,116 @@ def test_database_wide_average_needs_a_clear_price_scope_before_dependencies():
     assert reply.kind == "clarify"
 
 
+# --- the repair retry (root cause #3: a malformed reply was a final, hard dead end) --------
+
+def test_a_malformed_first_response_gets_one_repair_retry_then_succeeds():
+    model = FakeModel({"route": "shell", "junk": True},   # fails schema validation
+                      _route("database_query",
+                             filters=[{"field": "zip", "op": "=", "value": "10308"}]))
+    reply = chat.handle(USER, "T", "homes in 10308", store=_store(), prefs=PREFS,
+                        backend=model, web_provider=Bomb())
+    assert reply.kind == "query"
+    assert len(model.calls) == 2
+    second_prompt = model.calls[1][0]
+    assert "schema" in second_prompt.lower()
+    for key in rc.ROUTE_SCHEMA["required"]:
+        assert key in second_prompt
+
+
+def test_a_repair_retry_that_is_also_malformed_falls_through_to_clarify_after_exactly_two_calls():
+    model = FakeModel("also not json", "still not json")
+    reply = chat.handle(USER, "T", "homes in 10308", store=_store(), prefs=PREFS,
+                        backend=model, web_provider=Bomb())
+    assert reply.kind == "clarify"
+    assert len(model.calls) == 2, "must not loop past one bounded retry"
+
+
+def test_a_repair_retry_is_never_attempted_when_the_first_response_is_already_valid():
+    model = FakeModel(_route("general_reasoning", reply="A clean first answer."))
+    reply = chat.handle(USER, "T", "explain PITI", store=Bomb(), prefs=PREFS,
+                        backend=model, web_provider=Bomb())
+    assert reply.kind == "general_reasoning"
+    assert len(model.calls) == 1, "zero extra cost in the common (valid-first-reply) case"
+
+
+def test_repair_retry_of_a_general_reasoning_response_does_not_touch_the_database():
+    """The retry itself still respects the no-database-for-general-reasoning boundary."""
+    model = FakeModel(
+        "not valid json at all",
+        _route("general_reasoning", reply="Explained without touching any listing."),
+    )
+    reply = chat.handle(USER, "T", "explain amortization", store=Bomb(), prefs=PREFS,
+                        backend=model, web_provider=Bomb())
+    assert reply.kind == "general_reasoning"
+    assert len(model.calls) == 2
+
+
+def test_repair_retry_usage_is_recorded_once_for_the_failed_call_and_once_for_the_retry_when_it_succeeds():
+    store = _store()
+    model = FakeModel({"bad": "shape"},
+                      _route("database_query",
+                             filters=[{"field": "zip", "op": "=", "value": "10308"}]))
+    reply = chat.handle(USER, "T", "homes in 10308", store=store, prefs=PREFS,
+                        backend=model, web_provider=Bomb())
+    assert reply.kind == "query"
+    spent = Usage(store).spent_today(USER, "fake")
+    assert spent["requests"] == 2, \
+        "one accounting point for the wasted first call, one for the real retry — never double"
+
+
+def test_repair_retry_usage_for_a_general_reasoning_retry_records_nothing():
+    """general_reasoning/web_research must never touch `store` — proven here with
+    store=Bomb(), same as the non-retry case. The wasted first call's usage is snapshotted
+    in handle() but only actually recorded from _database_reply, which this route never
+    reaches; the snapshot is simply dropped. Matches the documented, pre-existing gap
+    where general_reasoning/web_research replies are never metered at all."""
+    model = FakeModel("garbage", _route("general_reasoning", reply="Answered."))
+    reply = chat.handle(USER, "T", "explain PITI", store=Bomb(), prefs=PREFS,
+                        backend=model, web_provider=Bomb())
+    assert reply.kind == "general_reasoning"
+    assert len(model.calls) == 2
+
+
+# --- private fields must never round-trip through session context (Design E) ---------------
+
+def test_vocabulary_and_context_never_leak_private_fields_across_a_two_turn_conversation():
+    """An OWNER-level user may legally filter on a private field in turn 1 (their own
+    level allows it) — but the routing prompt is ALWAYS built at 'read' level regardless of
+    who is asking, so that filter must never round-trip back as context in turn 2."""
+    chat_vocabulary.reset_cache()
+    store = _store()
+    access = Access(store)
+    access.edit(USER, access_level="owner")
+    store.update_fields(
+        list(store.conn.execute("SELECT match_key FROM listings").fetchone())[0],
+        {"analysis": "renovate the kitchen for best ROI"}, allow_protected=True)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        sessions = SessionStore(os.path.join(tmp, "s.sqlite"))
+        model = FakeModel(
+            _route("database_query",
+                   filters=[{"field": "analysis", "op": "contains", "value": "renovate"}]),
+            _route("database_query", filters=[{"field": "status", "op": "=", "value": "active"}]),
+        )
+        first = chat.handle(USER, "T", "which listings mention renovate in the analysis",
+                            store=store, prefs=PREFS, backend=model, web_provider=Bomb(),
+                            session_store=sessions)
+        assert first.kind == "query", "an owner-level filter on a private field must succeed"
+
+        chat.handle(USER, "T", "show me something else", store=store, prefs=PREFS,
+                   backend=model, web_provider=Bomb(), session_store=sessions)
+        assert len(model.calls) == 2
+        second_prompt = model.calls[1][0]
+        assert "analysis" not in second_prompt
+        assert "renovate" not in second_prompt
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]
     for fn in tests:
         chat.reset_throttle()
+        chat_vocabulary.reset_cache()
         fn()
         print(f"  ok  {fn.__name__}")
     print(f"{len(tests)} passed — Phase 3 routing is isolated, bounded, cited, and offline")

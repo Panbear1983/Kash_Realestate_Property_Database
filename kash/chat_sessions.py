@@ -8,6 +8,28 @@ import sqlite3
 import time
 from pathlib import Path
 
+from .chat_policy import CHAT_FIELDS, OP_ALIAS
+
+_CANONICAL_OPS = frozenset(OP_ALIAS.values())
+_MAX_STORED_FILTERS = 8   # bounds prompt growth from replayed context
+
+
+def _clean_stored_filter(raw) -> dict | None:
+    """Re-validate the shape and re-apply the CHAT_FIELDS ceiling here, since whatever is
+    stored is replayed verbatim into a FUTURE routing prompt regardless of that future
+    message's own access level — an owner's private-field filter must never round-trip
+    back into a prompt that is always built at 'read' level (see chat.py's
+    _visible_columns)."""
+    if not isinstance(raw, dict):
+        return None
+    field, op = str(raw.get("field") or ""), str(raw.get("op") or "")
+    if field not in CHAT_FIELDS or op not in _CANONICAL_OPS:
+        return None
+    value = raw.get("value")
+    if value is None or isinstance(value, (list, dict, tuple, set)):
+        return None
+    return {"field": field, "op": op, "value": str(value)}
+
 
 def default_path() -> Path:
     return Path(pwd.getpwuid(os.getuid()).pw_dir) / ".local" / "state" / "kash" / "sessions.sqlite"
@@ -30,18 +52,23 @@ class SessionStore:
         return con
 
     def save(self, user_id, *, filters, listing_keys, selected_key=None, raw_text=None, now=None):
-        """Persist only allow-listed structured search state; raw text is deliberately ignored."""
+        """Persist only allow-listed structured search state; raw text is deliberately
+        ignored. `filters` is the real SafeSpec shape — a list of {field,op,value} dicts —
+        re-validated here against CHAT_FIELDS regardless of the caller's own access level
+        (see _clean_stored_filter)."""
         del raw_text
         current = int(time.time()) if now is None else int(now)
-        safe_filters = {str(k): v for k, v in dict(filters).items()
-                        if str(k) in {"status", "max_price", "min_price", "neighborhood", "property_type", "min_baths", "sort"}}
+        cleaned = [_clean_stored_filter(f) for f in (filters or [])]
+        safe_filters = [f for f in cleaned if f is not None][:_MAX_STORED_FILTERS]
         safe_keys = tuple(str(key) for key in listing_keys if str(key))
         selected = str(selected_key) if selected_key in safe_keys else None
         with self._connect() as con:
             con.execute("INSERT INTO private_sessions(user_id,filters_json,listing_keys_json,selected_key,expires_at) VALUES(?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET filters_json=excluded.filters_json, listing_keys_json=excluded.listing_keys_json, selected_key=excluded.selected_key, expires_at=excluded.expires_at", (int(user_id), json.dumps(safe_filters, sort_keys=True), json.dumps(safe_keys), selected, current + self.ttl_seconds))
 
     def save_search(self, user_id, *, filters, rows, now=None):
-        """Persist only returned match keys from a successful safe search; never row content."""
+        """Persist the real filter list AND the returned match keys from a successful safe
+        search; never row content. Retaining the filters (not just sort) is what lets a
+        later message modify rather than only reference the last search."""
         keys = [row.get("property_id") or row.get("source_url") or row.get("listing_url")
                 or row.get("match_key")
                 for row in rows if isinstance(row, dict)
@@ -56,7 +83,11 @@ class SessionStore:
             if not row or row[3] <= current:
                 con.execute("DELETE FROM private_sessions WHERE user_id=?", (int(user_id),))
                 return None
-        return {"filters": json.loads(row[0]), "listing_keys": tuple(json.loads(row[1])), "selected_key": row[2], "expires_at": row[3]}
+        filters = json.loads(row[0])
+        if not isinstance(filters, list):
+            filters = []          # a pre-migration dict-shaped row; ignore rather than crash
+        return {"filters": filters, "listing_keys": tuple(json.loads(row[1])),
+                "selected_key": row[2], "expires_at": row[3]}
 
     def clear(self, user_id):
         with self._connect() as con:
