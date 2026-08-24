@@ -20,7 +20,7 @@ from collections import Counter
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from kash import nl, preferences, query   # noqa: E402
+from kash import chat, llm, preferences, query   # noqa: E402
 from kash.store import Store              # noqa: E402
 
 DB = os.path.join(HERE, "pool.db")
@@ -106,8 +106,12 @@ def main():
         return
     store = Store(DB)
     prefs = preferences.load(PREFS) if os.path.exists(PREFS) else {}
-    ok, why = nl.available(prefs)
-    nl_note = nl.route(prefs).name if ok else f"off ({why})"
+    try:
+        _banner_backend = llm.route((prefs or {}).get("llm"), job="chat")
+        ok, why = _banner_backend.available()
+        nl_note = _banner_backend.name if ok else f"off ({why})"
+    except Exception as e:  # noqa: BLE001
+        nl_note = f"off ({e})"
     print(f"Kash shell — {store.count()} listings.  NL mode: {nl_note}.  Type 'help'.")
     while True:
         try:
@@ -139,12 +143,20 @@ def main():
                 print("  error:", e)
         elif cmd == "ask":
             try:
-                backend = nl.route(prefs)
-                msg, rows = nl.answer(rest, store, backend=backend)
-                print(f"  {msg}" + (f"  [{backend.chosen}]" if backend.chosen else ""))
-                print_rows(rows)
-            except RuntimeError as e:
-                print(f"  {e}\n  -> enable Codex/ChatGPT: run 'codex login' (uses your subscription)")
+                # The canonical conversation engine — same four-route contract as the
+                # Telegram bridge and the dashboard. Actor 0 matches the dashboard's
+                # metering convention.
+                backend = llm.route((prefs or {}).get("llm"), job="chat",
+                                    actor="0", store=store)
+                ask_prefs = dict(prefs)
+                ask_prefs["chat"] = {**(prefs.get("chat") or {}), "enabled": True}
+                result = chat.handle(0, "Shell owner", rest, store=store,
+                                     prefs=ask_prefs, backend=backend,
+                                     session_store=None)
+                rung = f"  [{result.backend}]" if result.backend else ""
+                print(f"  {result.text}{rung}")
+                if result.rows:
+                    print_rows(list(result.rows))
             except Exception as e:  # noqa: BLE001
                 print("  NL error:", e)
         else:

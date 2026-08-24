@@ -105,6 +105,86 @@ def _ask(text, user_id=ALLOWED, store=None, backend=None, prefs=None, name="Test
     return reply, store, backend
 
 
+# --- retired pre-routes: phrase parity through the router -----------------------------------
+# "show all active", "best deal", "recently sold", and "new listings last N days" were regex
+# pre-routes with hardcoded specs. They now flow through the router; each test scripts the
+# spec the router is expected to produce for the phrase and asserts the same end shape the
+# pre-route used to deliver. (The whole-pool average and market comparison remain
+# deterministic — see test_phase3_routing.)
+
+def _router_spec(**over):
+    spec = {"route": "database_query", "reply": "", "filters": [], "sort": "rank",
+            "order": "asc", "limit": 20, "web_queries": []}
+    spec.update(over)
+    return spec
+
+
+def test_show_all_active_parity_via_the_router():
+    reply, _, backend = _ask("show all active listings", backend=FakeBackend(_router_spec(
+        reply="All active listings:",
+        filters=[{"field": "status", "op": "=", "value": "active"}], limit=2000)))
+    assert reply.kind == "query"
+    assert backend.calls == 1
+    assert "All active listings:" in reply.text
+
+
+def test_best_deal_parity_via_the_router():
+    reply, _, backend = _ask("what's the best deal right now?", backend=FakeBackend(
+        _router_spec(reply="Best value homes:",
+                     filters=[{"field": "status", "op": "=", "value": "active"}],
+                     sort="price_per_sqft", order="asc", limit=10)))
+    assert reply.kind == "query"
+    assert backend.calls == 1
+
+
+def test_recently_sold_parity_via_the_router():
+    store = _store()
+    store.upsert({"street_address": "9 Sold Ct", "zip": "10308", "status": "sold",
+                  "sold_date": "2026-08-01", "list_price": 640000}, "fixture")
+    reply, _, _ = _ask("recently sold homes", store=store, backend=FakeBackend(
+        _router_spec(reply="Recently sold homes:",
+                     filters=[{"field": "status", "op": "=", "value": "sold"}],
+                     sort="sold_date", order="desc")))
+    assert reply.kind == "query"
+    assert "9 Sold Ct" in reply.text
+
+
+def test_new_listings_window_parity_via_the_router():
+    store = _store()
+    store.upsert({"street_address": "4 Fresh Way", "zip": "10308", "status": "active",
+                  "first_seen_date": "2099-01-01", "list_price": 610000}, "fixture")
+    reply, _, _ = _ask("new listings in the last 10 days", store=store,
+                       backend=FakeBackend(_router_spec(
+                           reply="New listings:",
+                           filters=[{"field": "status", "op": "=", "value": "active"},
+                                    {"field": "first_seen_date", "op": ">=",
+                                     "value": "2099-01-01"}],
+                           sort="first_seen_date", order="desc")))
+    assert reply.kind == "query"
+    assert "4 Fresh Way" in reply.text and "Fairlawn" not in reply.text
+
+
+def test_a_misspelled_neighborhood_is_corrected_with_a_visible_note():
+    from kash.readonly import ReadOnlyStore
+    store = _store()
+    store.upsert({"street_address": "12 Annadale Blvd", "zip": "10312",
+                  "list_price": 720000, "status": "active",
+                  "neighborhood": "Annadale"}, "fixture")
+    chat.reset_throttle()
+    chat_vocabulary.reset_cache()
+    chat_vocabulary.maybe_refresh(ReadOnlyStore(store), {})
+    backend = FakeBackend(_router_spec(
+        reply="Homes in Annadale:",
+        filters=[{"field": "neighborhood", "op": "=", "value": "Anadale"}]))
+    reply = chat.handle(ALLOWED, "Tester", "homes in Anadale", store=store,
+                        prefs=PREFS, backend=backend)
+    chat_vocabulary.reset_cache()
+    assert reply.kind == "query"
+    assert "12 Annadale Blvd" in reply.text
+    assert '(assuming "Annadale" for "Anadale")' in reply.text
+    assert any(d.startswith("fuzzy_corrected:neighborhood") for d in reply.dropped)
+
+
 # --- feature flag -------------------------------------------------------------------------------
 
 def test_disabled_by_default():

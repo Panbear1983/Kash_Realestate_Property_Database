@@ -7,10 +7,9 @@ arguments, which is what lets the chat path be tested with fakes.
 bound as parameters — SQL injection is not the exposure. Two other things are, once the spec
 comes from a model driven by a stranger's message rather than from the owner at a dashboard:
 
-1. **Crashes.** `kash.nl.converse` computes `int(spec["limit"])` outside its try block, and
-   `query._cast` raises TypeError (not the ValueError nl catches) on a null value. Both reach
-   the user as a traceback. `sanitize_spec` removes the whole class by validating types before
-   the spec reaches query.py.
+1. **Crashes.** `query._cast` raises TypeError on a null value and ValueError on a
+   non-numeric one — either would reach the user as a traceback. `sanitize_spec` removes
+   the whole class by validating types before the spec reaches query.py.
 
 2. **Reading more than was intended.** `query.py` whitelists all 88 schema columns, including
    `my_notes`. A filter is an oracle even when the column is never rendered: asking for
@@ -26,10 +25,11 @@ because they are already shared and because `rank` is the default sort.
 """
 from __future__ import annotations
 
+import difflib
 import re
 from dataclasses import dataclass, field as _field
 
-from .query import _OPS
+from .query import _OPS, AGGREGATES, AGGREGATE_FIELDS, GROUP_BY_FIELDS
 from .schema import FIELD_ORDER, INT_FIELDS, REAL_FIELDS
 
 # --- limits ---------------------------------------------------------------------------------
@@ -37,7 +37,7 @@ from .schema import FIELD_ORDER, INT_FIELDS, REAL_FIELDS
 MAX_MESSAGE_CHARS = 500     # inbound, before it is ever put in a prompt
 MAX_REPLY_CHARS = 700       # the model's free-text 'reply', echoed to a human
 MIN_LIMIT = 1
-MAX_LIMIT = 100             # matches the ceiling kash.nl.converse already applies
+MAX_LIMIT = 100             # LIMIT -1 is unlimited in SQLite; 100 rows is already six messages
 DEFAULT_LIMIT = 20
 DEFAULT_SORT = "rank"
 
@@ -45,6 +45,10 @@ DEFAULT_SORT = "rank"
 #: the *reply*. 100 briefs is roughly six Telegram messages, which reads as a flood rather
 #: than an answer, so the reply says "showing 25 of 61" and lets the user narrow it.
 MAX_ROWS_RENDERED = 25
+
+#: OR alternatives one filter may carry. Mirrors reasoning_contract.MAX_OR_VALUES (the
+#: schema hint); this is the enforced ceiling.
+MAX_OR_VALUES = 5
 
 # --- what is private ------------------------------------------------------------------------
 
@@ -76,8 +80,8 @@ def visible_fields(access_level: str | None = "read") -> frozenset[str]:
 
 
 # --- alias maps -----------------------------------------------------------------------------
-# Canonical copies of what kash.nl applies today. tests/test_chat_policy.py asserts these stay
-# a superset of nl's private maps, so the two cannot drift apart unnoticed.
+# The canonical alias maps (absorbed from the retired kash.nl layer). tests/test_chat_policy.py
+# keeps them a superset of what that layer understood, so old phrasings keep translating.
 
 OP_ALIAS = {
     "eq": "=", "equals": "=", "=": "=", "==": "=",
@@ -109,7 +113,15 @@ class SafeSpec:
     sort: str = DEFAULT_SORT
     order: str = "asc"
     limit: int = DEFAULT_LIMIT
+    # "" throughout means "a plain row query". Set (all validated) only when the spec asked
+    # for a whitelisted aggregate — see sanitize_spec.
+    aggregate: str = ""
+    aggregate_field: str = ""
+    group_by: str = ""
     dropped: tuple[str, ...] = ()
+    #: (field, given, canonical) for every fuzzy value correction applied — surfaced to the
+    #: user as an "(assuming …)" note so a silent correction can never mislead.
+    corrections: tuple[tuple[str, str, str], ...] = ()
 
 
 # --- text ------------------------------------------------------------------------------------
@@ -173,27 +185,40 @@ def _numeric_ok(value: str) -> bool:
     return True
 
 
-def _clean_filter(raw, allowed: frozenset[str], dropped: list[str]) -> dict | None:
-    if not isinstance(raw, dict):
-        dropped.append("filter_not_an_object")
-        return None
+FUZZY_CUTOFF = 0.8
 
-    field = _canonical_field(raw.get("field"))
-    if not field:
-        dropped.append("filter_without_field")
-        return None
-    if field not in allowed:
-        # Same message whether the column is private or imaginary: confirming that `my_notes`
-        # exists is itself a small leak.
-        dropped.append(f"field_not_available:{field}")
-        return None
 
-    op = OP_ALIAS.get(str(raw.get("op", "=")).strip().lower())
-    if op is None or op not in _OPS:
-        dropped.append(f"unsupported_operator:{raw.get('op')}")
-        return None
+def _fuzzy_correct(field: str, op: str, value: str, vocab, dropped: list[str],
+                   corrections: list[tuple[str, str, str]]) -> str:
+    """Map a near-miss value onto the stored one it plainly means. Only for `=` on fields
+    whose live values were provided (vocab is injected — this module stays I/O-free), only
+    when the given value matches nothing exactly. Two rungs: case-insensitive exact (fixes
+    'great kills' — SQLite `=` is case-sensitive), then difflib at a high cutoff. Every
+    correction is recorded; below-cutoff values pass through untouched and simply match
+    nothing, exactly as before."""
+    if not vocab or op != "=" or field not in vocab:
+        return value
+    candidates = [str(v) for v in vocab.get(field, ()) if str(v)]
+    if not candidates or value in candidates:
+        return value
+    lower_map: dict[str, str] = {}
+    for c in candidates:
+        lower_map.setdefault(c.lower(), c)
+    hit = lower_map.get(value.lower())
+    if hit is None:
+        close = difflib.get_close_matches(value.lower(), list(lower_map), n=1,
+                                          cutoff=FUZZY_CUTOFF)
+        hit = lower_map[close[0]] if close else None
+    if hit is None or hit == value:
+        return value
+    dropped.append(f"fuzzy_corrected:{field}:{value}->{hit}")
+    corrections.append((field, value, hit))
+    return hit
 
-    value = raw.get("value")
+
+def _clean_value(field: str, op: str, value, dropped: list[str]) -> str | None:
+    """One scalar filter value, cleaned exactly the same whether it stands alone or inside
+    an OR group. Returns None (with a reason recorded) when unusable."""
     if value is None:
         dropped.append(f"null_value:{field}")     # would be TypeError inside query._cast
         return None
@@ -213,19 +238,88 @@ def _clean_filter(raw, allowed: frozenset[str], dropped: list[str]) -> dict | No
     if field in _NUMERIC and op != "contains" and not _numeric_ok(value):
         dropped.append(f"non_numeric_value:{field}={value}")
         return None
+    return value
 
+
+def _clean_filter(raw, allowed: frozenset[str], dropped: list[str], *, vocab=None,
+                  corrections: list | None = None) -> dict | None:
+    corrections = corrections if corrections is not None else []
+    if not isinstance(raw, dict):
+        dropped.append("filter_not_an_object")
+        return None
+
+    field = _canonical_field(raw.get("field"))
+    if not field:
+        dropped.append("filter_without_field")
+        return None
+    if field not in allowed:
+        # Same message whether the column is private or imaginary: confirming that `my_notes`
+        # exists is itself a small leak.
+        dropped.append(f"field_not_available:{field}")
+        return None
+
+    op = OP_ALIAS.get(str(raw.get("op", "=")).strip().lower())
+    if op is None or op not in _OPS:
+        dropped.append(f"unsupported_operator:{raw.get('op')}")
+        return None
+
+    raw_values = raw.get("values")
+    if raw_values:
+        # An OR group: alternatives for this one field. When both forms are set, the group
+        # wins — the model was told value must be "" alongside values, so a populated value
+        # is noise, not intent.
+        if not isinstance(raw_values, (list, tuple)):
+            dropped.append(f"or_group_not_a_list:{field}")
+            return None
+        if raw.get("value"):
+            dropped.append(f"or_group_both_value_forms:{field}")
+        if op not in ("=", "contains"):
+            # `!= a OR != b` is vacuously true; `< a OR < b` is just `< max(a, b)`. Neither
+            # is ever what a user meant, so the whole filter drops rather than guessing.
+            dropped.append(f"or_group_bad_operator:{field}")
+            return None
+        if len(raw_values) > MAX_OR_VALUES:
+            dropped.append(f"or_group_too_large:{field}")
+        cleaned_values: list[str] = []
+        # Dedupe BEFORE capping so duplicates don't crowd out real alternatives; the raw
+        # iteration itself is bounded so an oversized hostile list cannot buy unbounded work.
+        for v in list(raw_values)[:MAX_OR_VALUES * 10]:
+            cleaned = _clean_value(field, op, v, dropped)
+            if cleaned is not None:
+                cleaned = _fuzzy_correct(field, op, cleaned, vocab, dropped, corrections)
+            if cleaned is not None and cleaned not in cleaned_values:
+                cleaned_values.append(cleaned)
+                if len(cleaned_values) == MAX_OR_VALUES:
+                    break
+        if not cleaned_values:
+            dropped.append(f"or_group_empty:{field}")
+            return None
+        if len(cleaned_values) == 1:
+            return {"field": field, "op": op, "value": cleaned_values[0]}
+        return {"field": field, "op": op, "value": "", "values": cleaned_values}
+
+    value = _clean_value(field, op, raw.get("value"), dropped)
+    if value is None:
+        return None
+    value = _fuzzy_correct(field, op, value, vocab, dropped, corrections)
     return {"field": field, "op": op, "value": value}
 
 
-def sanitize_spec(spec, access_level: str | None = "read") -> SafeSpec:
+def sanitize_spec(spec, access_level: str | None = "read", *, vocab=None) -> SafeSpec:
     """Turn a model-produced query spec into one that is safe to execute.
 
     Never raises and never returns a spec that makes `kash.query.build` raise: unusable parts
     are dropped, with a reason recorded in `.dropped` for logging, rather than failing the
     whole request. A spec that is entirely junk degrades to 'first 20 by rank', which is a
     reasonable answer to a question we could not parse.
+
+    `vocab`, when given, is {field: (stored values…)} from the live pool (injected — this
+    module performs no I/O); near-miss `=` values are corrected against it and every
+    correction is surfaced via `.corrections`. Without it, behavior is byte-identical to
+    the pre-fuzzy sanitizer.
     """
     dropped: list[str] = []
+    corrections: list[tuple[str, str, str]] = []
     if not isinstance(spec, dict):
         return SafeSpec(dropped=("spec_not_an_object",))
 
@@ -239,7 +333,8 @@ def sanitize_spec(spec, access_level: str | None = "read") -> SafeSpec:
         dropped.append("filters_not_a_list")
     else:
         for raw in raw_filters:
-            cleaned = _clean_filter(raw, allowed, dropped)
+            cleaned = _clean_filter(raw, allowed, dropped, vocab=vocab,
+                                    corrections=corrections)
             if cleaned is not None:
                 filters.append(cleaned)
 
@@ -266,5 +361,26 @@ def sanitize_spec(spec, access_level: str | None = "read") -> SafeSpec:
         dropped.append(f"limit_above_maximum:{limit}")
         limit = MAX_LIMIT
 
+    # The aggregate trio is all-or-nothing: any invalid part clears all three, and the
+    # caller's fail-closed handling turns the recorded reason into a clarify — a silent row
+    # dump would misrepresent an aggregate question as answered.
+    aggregate = str(spec.get("aggregate") or "").strip().lower()
+    aggregate_field = _canonical_field(spec.get("aggregate_field"))
+    group_by = _canonical_field(spec.get("group_by"))
+    if aggregate or aggregate_field or group_by:
+        if aggregate not in AGGREGATES:
+            dropped.append(f"aggregate_not_available:{aggregate or spec.get('aggregate')}")
+            aggregate = aggregate_field = group_by = ""
+        elif aggregate != "count" and aggregate_field not in AGGREGATE_FIELDS:
+            dropped.append(f"aggregate_field_not_available:{aggregate_field or '(missing)'}")
+            aggregate = aggregate_field = group_by = ""
+        elif group_by and group_by not in GROUP_BY_FIELDS:
+            dropped.append(f"group_by_not_available:{group_by}")
+            aggregate = aggregate_field = group_by = ""
+        elif aggregate == "count":
+            aggregate_field = ""      # count takes no field; ignore a stray one
+
     return SafeSpec(filters=filters, sort=sort, order=order, limit=limit,
-                    dropped=tuple(dropped))
+                    aggregate=aggregate, aggregate_field=aggregate_field,
+                    group_by=group_by, dropped=tuple(dropped),
+                    corrections=tuple(corrections))

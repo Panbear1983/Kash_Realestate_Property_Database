@@ -31,7 +31,7 @@ from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static, S
 from rich.markup import escape
 from rich.text import Text
 
-from kash import chat, nl, preferences, query, status
+from kash import chat, llm, preferences, query, status
 from kash.access import Access
 from kash.contribution_admin import ContributionAdmin
 from kash.contributions import ContributionService
@@ -721,8 +721,9 @@ class KashDashboard(App):
             # budget and ladder demotion actually apply here (as "owner" the spend was
             # invisible and the dashboard was unmetered). Also honors an F2-set model
             # override for id 0.
-            backend = nl.route(self.prefs, self.access.get_model_override(0),
-                               actor="0", store=self.store)
+            backend = llm.route((self.prefs or {}).get("llm"),
+                                self.access.get_model_override(0), "chat",
+                                actor="0", store=self.store)
             dashboard_prefs = dict(self.prefs)
             dashboard_prefs["chat"] = {**(self.prefs.get("chat") or {}), "enabled": True}
             result = chat.handle(0, "Dashboard owner", message, store=self.store,

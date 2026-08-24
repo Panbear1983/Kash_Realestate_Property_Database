@@ -65,8 +65,14 @@ class FakeBackend:
 
 
 def ask(store, sessions, message, backend=None):
+    # The default backend routes to the all-active database query — the shape the router
+    # itself produces for "show all active listings" (once a regex pre-route, now retired).
     return chat.handle(USER, "Tester", message, store=store, prefs=PREFS,
-                       backend=backend or FakeBackend(), session_store=sessions)
+                       backend=backend or FakeBackend(
+                           route="database_query", reply="All active listings:",
+                           filters=[{"field": "status", "op": "=", "value": "active"}],
+                           limit=2000),
+                       session_store=sessions)
 
 
 def test_a_successful_query_saves_the_session():

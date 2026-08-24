@@ -26,7 +26,7 @@ _ENUM_FIELDS = ("property_type", "status", "tier", "view_priority", "flood_zone"
 _TOP_NEIGHBORHOODS = 15
 _MAX_VALUES_PER_FIELD = 20   # guards a runaway/free-text column added to _ENUM_FIELDS later
 
-_cache: dict = {"prompt_block": "", "examples": (), "at": None}
+_cache: dict = {"prompt_block": "", "examples": (), "values": {}, "at": None}
 
 
 def _distinct(ro, field: str, limit: int) -> list[tuple[str, int]]:
@@ -48,13 +48,16 @@ def _safe_flood_zones(prefs: dict) -> list[str]:
 def build(ro, prefs: dict) -> dict:
     """Compute the prompt vocabulary block and example queries fresh. Aggregate-only reads."""
     lines = []
+    stored_values: dict[str, tuple[str, ...]] = {}
     for field in _ENUM_FIELDS:
         values = _distinct(ro, field, _MAX_VALUES_PER_FIELD)
         if values:
             lines.append(f"{field}: " + ", ".join(str(v) for v, _ in values))
+            stored_values[field] = tuple(str(v) for v, _ in values)
     hoods = _distinct(ro, "neighborhood", _TOP_NEIGHBORHOODS)
     if hoods:
         lines.append("neighborhood (top by listing count): " + ", ".join(v for v, _ in hoods))
+        stored_values["neighborhood"] = tuple(str(v) for v, _ in hoods)
 
     safe_zones = _safe_flood_zones(prefs)
     lines.append(
@@ -87,7 +90,8 @@ def build(ro, prefs: dict) -> dict:
     if safe_zones:
         examples.append(f"'homes in a {safe_zones[0]} flood zone'")
 
-    return {"prompt_block": prompt_block, "examples": tuple(examples[:3])}
+    return {"prompt_block": prompt_block, "examples": tuple(examples[:3]),
+            "values": stored_values}
 
 
 def maybe_refresh(ro, prefs: dict, *, now: Optional[float] = None) -> None:
@@ -101,8 +105,8 @@ def maybe_refresh(ro, prefs: dict, *, now: Optional[float] = None) -> None:
         return
     try:
         fresh = build(ro, prefs or {})
-        _cache["prompt_block"], _cache["examples"], _cache["at"] = (
-            fresh["prompt_block"], fresh["examples"], now)
+        _cache["prompt_block"], _cache["examples"], _cache["values"], _cache["at"] = (
+            fresh["prompt_block"], fresh["examples"], fresh["values"], now)
     except Exception:  # noqa: BLE001 - diagnosis/vocabulary is best-effort, never fatal
         pass
 
@@ -117,6 +121,13 @@ def peek_examples() -> tuple[str, ...]:
     return _cache["examples"]
 
 
+def peek_values() -> dict:
+    """Cached distinct stored values per enum-like field (neighborhood included), for
+    deterministic value matching (pending-answer merges, fuzzy correction). Empty dict
+    before the first successful refresh — callers must degrade to exact behavior."""
+    return _cache["values"]
+
+
 def safe_clarify_with_examples() -> str:
     """reasoning_contract.SAFE_CLARIFY, plus live example queries when the cache is warm.
     Falls back to the bare string when it is not — byte-identical to today's behavior."""
@@ -129,4 +140,4 @@ def safe_clarify_with_examples() -> str:
 
 def reset_cache() -> None:
     """Test hook / config-reload hook, mirrors chat.reset_throttle() and llm.reset_cache()."""
-    _cache["prompt_block"], _cache["examples"], _cache["at"] = "", (), None
+    _cache["prompt_block"], _cache["examples"], _cache["values"], _cache["at"] = "", (), {}, None

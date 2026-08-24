@@ -22,7 +22,7 @@ _ALLOWED_ROUTES = {
     # every successful listing answer was ledgered as route="other" — i.e. the quality
     # ledger recorded zero successes while counting real clarifies against them.
     "query", "aggregate", "command", "throttled", "disabled", "empty",
-    "web_unavailable",
+    "web_unavailable", "query_analysis",
 }
 _RELEASE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
@@ -103,7 +103,8 @@ class QualityLedger:
         del message, reply, user_id
         route = _route(str(kind))
         outcome = "success" if route in {"database_aggregate", "database_query", "market_comparison",
-                                         "math", "general_reasoning", "web_research"} else route
+                                         "math", "general_reasoning", "web_research",
+                                         "query_analysis"} else route
         return self._record(surface=surface, route=route, outcome=outcome,
                             latency_bucket=_bucket(elapsed_seconds), release=release)
 

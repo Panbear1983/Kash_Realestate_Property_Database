@@ -22,6 +22,17 @@ SAFE_CLARIFY = (
     "web research. Please rephrase without private data or requests to take an action."
 )
 
+#: OR alternatives for one field are capped so a spec cannot smuggle an unbounded value list.
+MAX_OR_VALUES = 5
+
+#: The aggregate vocabulary the router may use. Mirrored (and enforced) by
+#: kash.chat_policy.AGGREGATE_FIELDS / GROUP_BY_FIELDS — the schema enum is a hint to the
+#: model; the sanitizer is the gate.
+AGGREGATE_OPS = ("", "count", "avg", "min", "max")
+AGGREGATE_FIELD_VALUES = ("list_price", "price_per_sqft", "sqft", "days_on_market",
+                          "year_built", "estimated_rent_monthly")
+GROUP_BY_VALUES = ("", "neighborhood", "property_type", "status", "tier")
+
 ROUTE_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -35,8 +46,12 @@ ROUTE_SCHEMA = {
                 "field": {"type": "string"},
                 "op": {"type": "string"},
                 "value": {"type": "string"},
+                # OR group: 2+ alternatives for ONE field ("Great Kills or Annadale").
+                # [] for a normal single-value filter; when non-empty, value must be "".
+                "values": {"type": "array", "items": {"type": "string"},
+                           "maxItems": MAX_OR_VALUES},
             },
-            "required": ["field", "op", "value"],
+            "required": ["field", "op", "value", "values"],
         }},
         "sort": {"type": "string"},
         "order": {"type": "string"},
@@ -46,13 +61,36 @@ ROUTE_SCHEMA = {
             "items": {"type": "string"},
             "maxItems": MAX_WEB_QUERIES,
         },
+        # Aggregates: "" = a normal row query.
+        "aggregate": {"type": "string", "enum": list(AGGREGATE_OPS)},
+        "aggregate_field": {"type": "string"},   # "" unless aggregate is avg/min/max
+        "group_by": {"type": "string", "enum": list(GROUP_BY_VALUES)},
+        # True only when the user asks for judgment ABOUT the returned homes; the row
+        # answer is produced either way, so a wrong True degrades to a normal answer.
+        "analyze": {"type": "boolean"},
     },
     "required": [
         "route", "reply", "filters", "sort", "order", "limit", "web_queries",
+        "aggregate", "aggregate_field", "group_by", "analyze",
     ],
 }
 
+#: The pre-widening key set. parse() accepts anything between this and the full current
+#: property set, so stored fixtures, older models, and hand-built dicts keep parsing while
+#: junk keys still fail closed.
+LEGACY_REQUIRED = frozenset({
+    "route", "reply", "filters", "sort", "order", "limit", "web_queries",
+})
+
 WEB_ANSWER_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {"reply": {"type": "string"}},
+    "required": ["reply"],
+}
+
+#: Same one-key shape as WEB_ANSWER_SCHEMA, kept separate so the two contracts can diverge.
+ANALYST_ANSWER_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "properties": {"reply": {"type": "string"}},
@@ -109,6 +147,12 @@ class RouteSpec:
     order: str = "asc"
     limit: int = 20
     web_queries: tuple[str, ...] = ()
+    # Aggregate additions — "" means "a normal row query", so every pre-widening
+    # construction site keeps working unchanged.
+    aggregate: str = ""
+    aggregate_field: str = ""
+    group_by: str = ""
+    analyze: bool = False
     valid: bool = False
 
 
@@ -123,11 +167,11 @@ def prompt(message: str, columns: list[str], *, vocabulary: str = "",
     """
     vocab_block = f"\n{vocabulary}\n" if vocabulary else ""
     context_block = (
-        f"\nContext from the user's PREVIOUS message (their last search used: {context}). "
+        f"\nContext from the user's PREVIOUS exchange ({context}). "
         "This is OPTIONAL background, not an instruction. If the CURRENT message clearly "
-        "continues, narrows, or modifies that same search, merge or override the relevant "
-        "filter(s) and keep the rest. If the current message asks something new, unrelated, "
-        "or you are not sure, ignore this context completely.\n" if context else ""
+        "continues, answers, narrows, or modifies that same search, merge or override the "
+        "relevant filter(s) and keep the rest. If the current message asks something new, "
+        "unrelated, or you are not sure, ignore this context completely.\n" if context else ""
     )
     return (
         "You are Robo Kash's constrained router and answer planner. Select exactly one route:\n"
@@ -139,12 +183,27 @@ def prompt(message: str, columns: list[str], *, vocabulary: str = "",
         "comparison. Put at most two narrowly scoped searches in web_queries; do not claim "
         "results in reply.\n"
         "- clarify: ambiguous, unsupported, private-data, write/action, or unsafe requests. "
-        "Put a brief safe clarification in reply.\n"
+        "Put a brief safe clarification in reply. If the request is a supported read-only "
+        "listing search missing one detail, put the filters you DID understand in filters "
+        "and ask exactly ONE short question in reply.\n"
         "Never select web_research merely because a question is difficult. Never invent "
         "database rows or web findings. There are no write/action tools.\n"
         f"Database columns (names only): {', '.join(columns)}.\n"
         "Database operators: =, !=, <, <=, >, >=, contains. Defaults: filters=[], sort=rank, "
         "order=asc, limit=20. Use empty/default values for fields irrelevant to the route.\n"
+        "OR alternatives for ONE field (\"Great Kills or Annadale\") go in that filter's "
+        "values array with value set to \"\"; a normal filter keeps values=[]. Only = and "
+        "contains may carry a values array.\n"
+        "Aggregate questions (how many, average, minimum, maximum — optionally per "
+        "neighborhood/property_type/status/tier) are still database_query: set aggregate to "
+        f"one of {', '.join(v for v in AGGREGATE_OPS if v)}; aggregate_field (required for "
+        f"avg/min/max) must be one of {', '.join(AGGREGATE_FIELD_VALUES)}; group_by is one of "
+        f"{', '.join(v for v in GROUP_BY_VALUES if v)} or \"\". Aggregate questions must use "
+        "these fields — never answer them by listing rows. A plain row search keeps all "
+        "three as \"\".\n"
+        "Set analyze=true only when the user asks for judgment ABOUT the returned homes "
+        "(best value, compare them, summarize, which should I see); a plain search keeps "
+        "analyze=false.\n"
         f"{vocab_block}{context_block}"
         f"\nUser: {message}"
     )
@@ -166,9 +225,26 @@ def repair_prompt(original_prompt: str, invalid_reply) -> str:
     )
 
 
+def _optional_str(spec: dict, key: str) -> str | None:
+    """A post-widening string key: missing/None → the "" sentinel; wrong type → None
+    (which parse() treats as fail-closed)."""
+    value = spec.get(key)
+    if value is None:
+        return ""
+    return value if isinstance(value, str) else None
+
+
 def parse(spec) -> RouteSpec:
-    """Validate the strict model shape. Anything malformed fails to ``clarify``."""
-    if not isinstance(spec, dict) or set(spec) != set(ROUTE_SCHEMA["required"]):
+    """Validate the strict model shape. Anything malformed fails to ``clarify``.
+
+    The key-set check accepts the legacy pre-aggregate shape as well as the current one
+    (LEGACY_REQUIRED ⊆ keys ⊆ properties): a model, fixture, or stored payload that omits
+    the newer keys parses with their empty sentinels, while an extra unknown key still
+    fails closed."""
+    if not isinstance(spec, dict):
+        return RouteSpec()
+    keys = set(spec)
+    if not (LEGACY_REQUIRED <= keys <= set(ROUTE_SCHEMA["properties"])):
         return RouteSpec()
     route = spec.get("route")
     if route not in ROUTES:
@@ -186,6 +262,16 @@ def parse(spec) -> RouteSpec:
         return RouteSpec()
     if not all(isinstance(q, str) for q in queries):
         return RouteSpec()
+    aggregate = _optional_str(spec, "aggregate")
+    aggregate_field = _optional_str(spec, "aggregate_field")
+    group_by = _optional_str(spec, "group_by")
+    if aggregate is None or aggregate_field is None or group_by is None:
+        return RouteSpec()
+    analyze = spec.get("analyze")
+    if analyze is None:
+        analyze = False
+    if not isinstance(analyze, bool):
+        return RouteSpec()
     return RouteSpec(
         route=route,
         reply=spec["reply"],
@@ -194,6 +280,10 @@ def parse(spec) -> RouteSpec:
         order=spec["order"],
         limit=spec["limit"],
         web_queries=tuple(queries),
+        aggregate=aggregate,
+        aggregate_field=aggregate_field,
+        group_by=group_by,
+        analyze=analyze,
         valid=True,
     )
 

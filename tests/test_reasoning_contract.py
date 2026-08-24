@@ -15,8 +15,11 @@ def test_prompt_includes_vocabulary_block_when_given():
 
 
 def test_prompt_omits_vocabulary_block_when_empty():
+    # "property_type: " (with values) is the vocabulary block's shape; the bare word now
+    # legitimately appears in the aggregate group_by teaching.
     text = rc.prompt("cheap homes", ["list_price"])
-    assert "property_type" not in text
+    assert "property_type: sf_detached" not in text
+    assert "property_type:" not in text
 
 
 def test_prompt_includes_optional_context_with_ignore_if_unrelated_wording():

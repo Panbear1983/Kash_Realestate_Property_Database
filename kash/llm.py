@@ -446,7 +446,7 @@ def resolve_ladder(cfg: Optional[dict], override: Optional[str] = None,
 class LadderBackend:
     """Tries each rung in turn; the first that is available *and* answers wins.
 
-    Satisfies the same two-method contract as a single backend, so kash.nl and kash.rank cannot
+    Satisfies the same two-method contract as a single backend, so kash.chat and kash.rank cannot
     tell the difference. After a successful call, `chosen` names the rung that produced the spec.
     """
 

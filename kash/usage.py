@@ -85,6 +85,15 @@ class Usage:
             "GROUP BY backend", (day, str(actor)))}
 
 
+def record_backend_call(store, backend, actor, job="chat"):
+    """Log one completed backend call (moved here from the retired kash.nl). Safe to call
+    with a partly-failed backend or a None one — silently a no-op."""
+    if store is None or actor is None or getattr(backend, "chosen", None) is None:
+        return
+    Usage(store).record(actor, backend.chosen, job=job,
+                        usage=getattr(backend, "last_usage", None))
+
+
 def budget_for(config: Optional[dict], actor) -> dict:
     """The budget applying to this actor: a per-actor entry, else the system or default one."""
     budgets = ((config or {}).get("budgets") or {})

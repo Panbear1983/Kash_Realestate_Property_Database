@@ -8,7 +8,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kash import chat_policy as cp                      # noqa: E402
-from kash import nl, query                              # noqa: E402
+from kash import query                                  # noqa: E402
 from kash.schema import FIELD_ORDER                     # noqa: E402
 from kash.store import Store                            # noqa: E402
 
@@ -167,13 +167,24 @@ def test_every_field_alias_target_is_a_real_column():
         assert target in FIELD_ORDER, target
 
 
-def test_policy_alias_maps_cover_what_nl_already_applies():
-    """kash.nl keeps private copies of these maps. If it gains an entry this module lacks,
-    the chat path would translate a question differently from the dashboard's `ask`."""
-    for name, mine in (("_OP_ALIAS", cp.OP_ALIAS), ("_FIELD_ALIAS", cp.FIELD_ALIAS)):
-        theirs = getattr(nl, name)
+# The retired kash.nl module's private alias maps, inlined verbatim as a compatibility
+# floor: every alias the old NL layer understood must keep working in chat_policy, so a
+# phrasing that used to translate keeps translating identically.
+_LEGACY_NL_OP_ALIAS = {"eq": "=", "equals": "=", "=": "=", "ne": "!=", "neq": "!=",
+                       "!=": "!=", "lt": "<", "<": "<", "lte": "<=", "le": "<=",
+                       "<=": "<=", "gt": ">", ">": ">", "gte": ">=", "ge": ">=",
+                       ">=": ">=", "contains": "contains", "like": "contains",
+                       "~": "contains"}
+_LEGACY_NL_FIELD_ALIAS = {"price": "list_price", "bedrooms": "beds", "bathrooms": "baths",
+                          "zip_code": "zip", "zipcode": "zip", "square_feet": "sqft",
+                          "sqfootage": "sqft", "school_rating": "school_gs_rating"}
+
+
+def test_policy_alias_maps_cover_what_the_retired_nl_layer_applied():
+    for name, theirs, mine in (("_OP_ALIAS", _LEGACY_NL_OP_ALIAS, cp.OP_ALIAS),
+                               ("_FIELD_ALIAS", _LEGACY_NL_FIELD_ALIAS, cp.FIELD_ALIAS)):
         missing = {k: v for k, v in theirs.items() if mine.get(k) != v}
-        assert not missing, f"kash.nl.{name} has entries chat_policy lacks: {missing}"
+        assert not missing, f"legacy nl {name} entries chat_policy lacks: {missing}"
 
 
 def test_order_is_normalized_to_asc_or_desc():
@@ -201,6 +212,182 @@ def test_clamping_handles_none():
     assert cp.clamp_message(None) == "" and cp.clamp_reply(None) == ""
 
 
+# --- OR groups ------------------------------------------------------------------------------
+
+def _group(field, op, values, value=""):
+    return _spec(filters=[{"field": field, "op": op, "value": value, "values": values}])
+
+
+def test_or_group_is_accepted_for_equals():
+    safe = cp.sanitize_spec(_group("neighborhood", "=", ["Great Kills", "Annadale"]))
+    assert safe.filters == [{"field": "neighborhood", "op": "=", "value": "",
+                             "values": ["Great Kills", "Annadale"]}]
+
+
+def test_or_group_with_one_value_collapses_to_a_plain_filter():
+    safe = cp.sanitize_spec(_group("neighborhood", "=", ["Great Kills"]))
+    assert safe.filters == [{"field": "neighborhood", "op": "=", "value": "Great Kills"}]
+
+
+def test_or_group_is_deduped_and_capped():
+    values = ["A", "A", "B", "C", "D", "E", "F", "G"]
+    safe = cp.sanitize_spec(_group("neighborhood", "=", values))
+    assert safe.filters[0]["values"] == ["A", "B", "C", "D", "E"][:cp.MAX_OR_VALUES]
+    assert any(d.startswith("or_group_too_large") for d in safe.dropped)
+
+
+def test_or_group_with_a_comparison_operator_is_dropped():
+    safe = cp.sanitize_spec(_group("list_price", "<", ["700000", "800000"]))
+    assert safe.filters == []
+    assert any(d.startswith("or_group_bad_operator") for d in safe.dropped)
+
+
+def test_or_group_wins_when_both_value_forms_are_set():
+    safe = cp.sanitize_spec(_group("neighborhood", "=", ["Great Kills", "Annadale"],
+                                   value="Eltingville"))
+    assert safe.filters[0]["values"] == ["Great Kills", "Annadale"]
+    assert any(d.startswith("or_group_both_value_forms") for d in safe.dropped)
+
+
+def test_or_group_on_a_private_field_is_dropped_with_the_undifferentiated_message():
+    safe = cp.sanitize_spec(_group("my_notes", "contains", ["divorce", "estate"]))
+    assert safe.filters == []
+    assert any(d.startswith("field_not_available") for d in safe.dropped)
+
+
+def test_or_group_that_cleans_to_nothing_is_dropped():
+    safe = cp.sanitize_spec(_group("list_price", "=", ["cheap", "affordable"]))
+    assert safe.filters == []
+    assert any(d.startswith("or_group_empty") for d in safe.dropped)
+
+
+def test_or_group_keeps_the_numeric_elements_that_survive():
+    safe = cp.sanitize_spec(_group("list_price", "=", ["700000", "cheap", "800000"]))
+    assert safe.filters[0]["values"] == ["700000", "800000"]
+    assert any(d.startswith("non_numeric_value") for d in safe.dropped)
+
+
+def test_or_group_executes_against_a_real_store():
+    store = Store(":memory:")
+    for hood in ("Great Kills", "Annadale", "Eltingville"):
+        store.upsert({"street_address": f"1 {hood} St", "zip": "10308",
+                      "neighborhood": hood, "list_price": 700000,
+                      "status": "active"}, "fixture")
+    safe = cp.sanitize_spec(_group("neighborhood", "=", ["Great Kills", "Annadale"]))
+    rows = query.run(store, filters=safe.filters, sort=safe.sort,
+                     order=safe.order, limit=safe.limit)
+    assert {r["neighborhood"] for r in rows} == {"Great Kills", "Annadale"}
+    store.close()
+
+
+# --- aggregates -----------------------------------------------------------------------------
+
+def test_grouped_count_aggregate_is_accepted():
+    safe = cp.sanitize_spec(_spec(aggregate="count", group_by="neighborhood"))
+    assert (safe.aggregate, safe.aggregate_field, safe.group_by) == ("count", "", "neighborhood")
+
+
+def test_avg_requires_a_whitelisted_field():
+    safe = cp.sanitize_spec(_spec(aggregate="avg"))
+    assert safe.aggregate == ""
+    assert any(d.startswith("aggregate_field_not_available") for d in safe.dropped)
+    safe = cp.sanitize_spec(_spec(aggregate="avg", aggregate_field="my_notes"))
+    assert safe.aggregate == ""
+    assert any(d.startswith("aggregate_field_not_available") for d in safe.dropped)
+
+
+def test_unknown_aggregate_is_cleared_with_a_reason():
+    safe = cp.sanitize_spec(_spec(aggregate="median", aggregate_field="list_price"))
+    assert (safe.aggregate, safe.aggregate_field, safe.group_by) == ("", "", "")
+    assert any(d.startswith("aggregate_not_available") for d in safe.dropped)
+
+
+def test_unknown_group_by_clears_the_whole_trio():
+    safe = cp.sanitize_spec(_spec(aggregate="count", group_by="street_address"))
+    assert (safe.aggregate, safe.aggregate_field, safe.group_by) == ("", "", "")
+    assert any(d.startswith("group_by_not_available") for d in safe.dropped)
+
+
+def test_count_ignores_a_stray_aggregate_field():
+    safe = cp.sanitize_spec(_spec(aggregate="count", aggregate_field="list_price"))
+    assert (safe.aggregate, safe.aggregate_field) == ("count", "")
+
+
+def test_aggregate_aliases_are_applied_to_the_field():
+    safe = cp.sanitize_spec(_spec(aggregate="avg", aggregate_field="price"))
+    assert safe.aggregate_field == "list_price"
+
+
+def test_no_aggregate_keys_means_a_plain_row_spec():
+    safe = cp.sanitize_spec(_spec())
+    assert (safe.aggregate, safe.aggregate_field, safe.group_by) == ("", "", "")
+    assert not safe.dropped
+
+
+def test_enforced_aggregate_whitelists_match_the_model_facing_contract():
+    """The schema enums are hints; query.py's frozensets are the gate. Drift guard."""
+    from kash import reasoning_contract as rc
+    assert set(v for v in rc.AGGREGATE_OPS if v) == set(query.AGGREGATES)
+    assert set(rc.AGGREGATE_FIELD_VALUES) == set(query.AGGREGATE_FIELDS)
+    assert set(v for v in rc.GROUP_BY_VALUES if v) == set(query.GROUP_BY_FIELDS)
+    assert rc.MAX_OR_VALUES == cp.MAX_OR_VALUES
+    assert not (query.AGGREGATE_FIELDS & cp.PRIVATE_FIELDS)
+    assert not (query.GROUP_BY_FIELDS & cp.PRIVATE_FIELDS)
+
+
+# --- fuzzy value correction -----------------------------------------------------------------
+
+_VOCAB = {"neighborhood": ("Great Kills", "Annadale", "Eltingville"),
+          "property_type": ("sf_detached", "condo")}
+
+
+def test_case_insensitive_exact_match_is_corrected():
+    safe = cp.sanitize_spec(_one("neighborhood", "=", "great kills"), vocab=_VOCAB)
+    assert safe.filters == [{"field": "neighborhood", "op": "=", "value": "Great Kills"}]
+    assert safe.corrections == (("neighborhood", "great kills", "Great Kills"),)
+    assert any(d.startswith("fuzzy_corrected") for d in safe.dropped)
+
+
+def test_a_one_typo_value_is_corrected_at_the_cutoff():
+    safe = cp.sanitize_spec(_one("neighborhood", "=", "Anadale"), vocab=_VOCAB)
+    assert safe.filters[0]["value"] == "Annadale"
+    assert safe.corrections == (("neighborhood", "Anadale", "Annadale"),)
+
+
+def test_below_cutoff_values_pass_through_untouched():
+    safe = cp.sanitize_spec(_one("neighborhood", "=", "Brooklyn Heights"), vocab=_VOCAB)
+    assert safe.filters[0]["value"] == "Brooklyn Heights"
+    assert safe.corrections == ()
+
+
+def test_fuzzy_never_touches_contains_or_comparison_ops():
+    safe = cp.sanitize_spec(_one("neighborhood", "contains", "anadale"), vocab=_VOCAB)
+    assert safe.filters[0]["value"] == "anadale"
+    assert safe.corrections == ()
+
+
+def test_fuzzy_corrects_inside_or_groups():
+    safe = cp.sanitize_spec(_group("neighborhood", "=", ["great kills", "Anadale"]),
+                            vocab=_VOCAB)
+    assert safe.filters[0]["values"] == ["Great Kills", "Annadale"]
+    assert len(safe.corrections) == 2
+
+
+def test_private_fields_are_never_fuzzed_because_the_field_check_runs_first():
+    hostile_vocab = {"my_notes": ("divorce sale",)}
+    safe = cp.sanitize_spec(_one("my_notes", "=", "divorce sale"), vocab=hostile_vocab)
+    assert safe.filters == []
+    assert safe.corrections == ()
+    assert any(d.startswith("field_not_available") for d in safe.dropped)
+
+
+def test_no_vocab_means_byte_identical_pre_fuzzy_behavior():
+    with_none = cp.sanitize_spec(_one("neighborhood", "=", "great kills"))
+    assert with_none.filters[0]["value"] == "great kills"
+    assert with_none.corrections == ()
+    assert not any(d.startswith("fuzzy_corrected") for d in with_none.dropped)
+
+
 # --- the point of all of it --------------------------------------------------------------------
 
 def test_a_sanitized_spec_always_executes():
@@ -215,6 +402,11 @@ def test_a_sanitized_spec_always_executes():
         _one("my_notes", "contains", "x"), _one("list_price", "<", "cheap"),
         _spec(sort="'; DROP TABLE listings; --"), _one("zip", "OR 1=1", "1"),
         None, "junk", {"filters": [{"field": None, "op": None, "value": None}]},
+        _group("neighborhood", "=", "not-a-list"),
+        _group("neighborhood", "=", [["nested"], {"a": 1}, None]),
+        _group("zip", "=", ["10308'; DROP TABLE listings; --"]),
+        _spec(aggregate="'; DROP TABLE listings; --", aggregate_field="list_price"),
+        _spec(aggregate="count", group_by="'; DROP TABLE listings; --"),
     ]
     for spec in hostile:
         safe = cp.sanitize_spec(spec)

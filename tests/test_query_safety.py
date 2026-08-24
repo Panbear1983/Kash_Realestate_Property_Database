@@ -129,6 +129,65 @@ def test_gap_private_columns_are_queryable():
     store.close()
 
 
+def test_or_group_values_are_bound_never_interpolated():
+    hostile = "'; DROP TABLE listings; --"
+    sql, params = query.build(
+        [{"field": "neighborhood", "op": "=", "value": "",
+          "values": ["Great Kills", hostile]}], None, "asc", 10)
+    assert hostile not in sql, sql
+    assert sql.count("?") == len(params) == 2
+    assert " OR " in sql and "(" in sql
+    assert params == ["Great Kills", hostile]
+
+
+def test_or_group_contains_binds_wildcards_per_value():
+    sql, params = query.build(
+        [{"field": "neighborhood", "op": "contains", "value": "",
+          "values": ["Kills", "dale"]}], None, "asc", 10)
+    assert params == ["%Kills%", "%dale%"]
+    assert sql.count("LIKE ?") == 2
+
+
+def test_or_group_runs_and_leaves_the_table_intact():
+    store = _pool()
+    rows = query.run(store, filters=[{"field": "neighborhood", "op": "=", "value": "",
+                                      "values": ["A", "'; DROP TABLE listings; --"]}])
+    assert rows == []
+    assert store.count() == 5, "table damaged"
+    store.close()
+
+
+def test_aggregate_builder_rejects_unknown_parts():
+    for args in (("median", "list_price", ""), ("avg", "my_notes", ""),
+                 ("count", "", "street_address")):
+        try:
+            query.build_aggregate([], *args)
+            raise AssertionError(f"accepted {args}")
+        except ValueError:
+            pass
+
+
+def test_aggregate_sql_shape_is_fixed_and_parameterized():
+    sql, params = query.build_aggregate(
+        [{"field": "status", "op": "=", "value": "active"}],
+        "avg", "list_price", "neighborhood")
+    assert sql.startswith('SELECT "neighborhood" AS grp, AVG("list_price") AS value')
+    assert 'GROUP BY "neighborhood"' in sql
+    assert f"LIMIT {query.MAX_AGGREGATE_GROUPS}" in sql
+    assert '"list_price" IS NOT NULL' in sql
+    assert params == ["active"]
+
+
+def test_aggregate_runs_against_a_real_pool():
+    store = _pool()
+    rows = query.run_aggregate(store, [], "count")
+    assert int(rows[0]["value"]) == 5
+    rows = query.run_aggregate(store, [], "avg", "list_price")
+    assert int(rows[0]["n"]) == 5
+    assert float(rows[0]["value"]) == 702000.0
+    store.close()
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

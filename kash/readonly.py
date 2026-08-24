@@ -16,7 +16,7 @@ Two layers, deliberately:
   wrapper, and it is what production should use.
 
 `kash.query.run()` only ever calls `store.execute_select`, so a `ReadOnlyStore` is a drop-in
-wherever a `Store` is passed today — no change to query.py or nl.py is needed.
+wherever a `Store` is passed today — no change to query.py is needed.
 """
 from __future__ import annotations
 

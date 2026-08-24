@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from . import chat_policy, llm, query
+from . import chat_policy, chat_vocabulary, llm, query
 from .notifications import format_listing_brief
 from .usage import Usage, format_usage
 
@@ -110,17 +110,23 @@ def _cmd_filter(args: str, ctx: Context) -> str:
     except ValueError as e:                 # shlex chokes on an unbalanced quote
         return f"I couldn't parse that filter ({e})."
 
-    # The typed filter is a spec like any other: same allow-list, same clamps. A person who
-    # types `filter my_notes~divorce` is asking the same question the model might have.
+    # The typed filter is a spec like any other: same allow-list, same clamps (and the same
+    # typo correction). A person who types `filter my_notes~divorce` is asking the same
+    # question the model might have.
     safe = chat_policy.sanitize_spec(
         {"filters": filters, "sort": sort, "order": order, "limit": limit},
-        ctx.access_level)
+        ctx.access_level, vocab=chat_vocabulary.peek_values())
     if safe.dropped and not safe.filters and filters:
         return f"I can't filter on that. ({'; '.join(safe.dropped[:2])})"
     rows = query.run(ctx.ro, filters=safe.filters, sort=safe.sort,
                      order=safe.order, limit=safe.limit)
-    return _render(rows, ctx.access_level, "{n} match — showing {shown}:",
-                   ro=ctx.ro, filters=safe.filters)
+    rendered = _render(rows, ctx.access_level, "{n} match — showing {shown}:",
+                       ro=ctx.ro, filters=safe.filters)
+    if safe.corrections:
+        note = " ".join(f'(assuming "{new}" for "{given}")'
+                        for _, given, new in safe.corrections)
+        rendered = f"{note}\n{rendered}"
+    return rendered
 
 
 def _cmd_show(args: str, ctx: Context) -> str:

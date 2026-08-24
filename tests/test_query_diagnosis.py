@@ -113,6 +113,22 @@ def test_aggregate_select_returns_query_shaped_rows_not_full_listing_rows():
     assert rows == [{"n": 5}]
 
 
+def test_diagnose_empty_treats_an_or_group_as_one_droppable_filter():
+    store = _pool()
+    filters = [{"field": "zip", "op": "=", "value": "", "values": ["10308", "10312"]},
+               {"field": "list_price", "op": ">", "value": "1000000"}]
+    out = query.diagnose_empty(store, filters)
+    assert out and out[0][0]["field"] == "list_price"
+    assert out[0][1] == 5
+    store.close()
+
+
+def test_describe_filter_renders_or_groups():
+    described = query.describe_filter(
+        {"field": "neighborhood", "op": "=", "value": "", "values": ["A", "B"]})
+    assert described == "neighborhood = A or B"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

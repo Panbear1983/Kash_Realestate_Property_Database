@@ -45,10 +45,10 @@ from . import (
     llm,
     local_aggregates,
     market_comparison,
-    nl,
     query,
     reasoning_contract,
     reasoning_router,
+    usage,
     web_research,
 )
 from .access import Access
@@ -136,6 +136,54 @@ def _render_rows(rows: list[dict], lead: str, level: str) -> str:
     return "\n".join(lines)
 
 
+_MONEY_AGG_FIELDS = frozenset({"list_price", "price_per_sqft", "estimated_rent_monthly"})
+
+
+def _format_agg_value(field: str, value) -> str:
+    if value is None:
+        return "n/a"
+    v = float(value)
+    if field in _MONEY_AGG_FIELDS:
+        return f"${v:,.0f}"
+    if field == "year_built":
+        return f"{v:.0f}"
+    return f"{v:,.0f}"
+
+
+def _render_aggregate(rows: list[dict], safe, lead: str) -> str:
+    """Deterministic rendering of a whitelisted aggregate result — numbers, never rows."""
+    agg = safe.aggregate
+    metric = "count" if agg == "count" else f"{agg} {safe.aggregate_field}"
+    lines = [lead] if lead else []
+    if safe.group_by:
+        if not rows:
+            return lead or "No listings match that."
+        for r in rows:
+            grp = r.get("grp")
+            grp = str(grp) if grp not in (None, "") else "(not recorded)"
+            n = int(r.get("n") or 0)
+            word = "home" if n == 1 else "homes"
+            if agg == "count":
+                lines.append(f"{grp}: {n} {word}")
+            else:
+                lines.append(f"{grp}: {metric} "
+                             f"{_format_agg_value(safe.aggregate_field, r.get('value'))} "
+                             f"across {n} {word}")
+        if len(rows) >= query.MAX_AGGREGATE_GROUPS:
+            lines.append(f"(top {query.MAX_AGGREGATE_GROUPS} groups shown)")
+        return "\n".join(lines)
+    row = rows[0] if rows else {}
+    n = int(row.get("n") or 0)
+    if agg == "count":
+        lines.append(f"{n} {'home matches' if n == 1 else 'homes match'}.")
+    elif not n or row.get("value") is None:
+        lines.append("No listings with a recorded value match that.")
+    else:
+        lines.append(f"{metric}: {_format_agg_value(safe.aggregate_field, row.get('value'))} "
+                     f"across {n} {'home' if n == 1 else 'homes'}.")
+    return "\n".join(lines)
+
+
 def _empty_result_reply(lead: str, diagnosis: list[tuple[dict, int]]) -> str:
     """Zero rows, explained: which single filter (if any) is the binding constraint,
     COUNT-only so this never leaks a second row-returning query's worth of content."""
@@ -176,6 +224,12 @@ _FAIL_CLOSED_DROPS = (
     "non_numeric_value",
     "filter_not_an_object",
     "filter_without_field",
+    "or_group_not_a_list",
+    "or_group_bad_operator",
+    "or_group_empty",     # a dropped group silently broadens exactly like a dropped filter
+    "aggregate_not_available",        # a row dump would misrepresent an aggregate question
+    "aggregate_field_not_available",
+    "group_by_not_available",
 )
 
 
@@ -215,9 +269,15 @@ def _followup_context(sess, ttl_seconds: int, *, now: Optional[float] = None) ->
     age = (ttl_seconds or 1800) - (expires_at - now)
     if age < 0 or age > _FOLLOWUP_CONTEXT_TTL_SECONDS:
         return ""
-    parts = [f"{f.get('field')} {f.get('op')} {f.get('value')}" for f in filters
-             if isinstance(f, dict) and f.get("field") and f.get("op")]
-    return "; ".join(parts)
+    parts = _render_filter_parts(filters)
+    return f"their last search used: {parts}" if parts else ""
+
+
+def _render_filter_parts(filters) -> str:
+    return "; ".join(
+        f"{f.get('field')} {f.get('op')} "
+        f"{' or '.join(str(v) for v in f['values']) if f.get('values') else f.get('value')}"
+        for f in filters if isinstance(f, dict) and f.get("field") and f.get("op"))
 
 
 def _session_key(row: dict):
@@ -274,10 +334,117 @@ def _followup_pick(user_id: int, *, store, keys, index: int,
                   "query", rows=(picked,))
 
 
+# --- pending clarification (slot-filling) ---------------------------------------------------
+# When the router asked ONE clarifying question and kept partial filters, the user's next
+# message is usually the bare answer ("Great Kills", "under 700k", "3 beds"). Tier 1 merges
+# those deterministically with zero model calls; anything else falls through to the normal
+# router with the pending question replayed as OPTIONAL context (tier 2) — the same
+# over-merge protection the follow-up context already carries. Consumption is one-shot, so
+# a wrong merge can never compound across turns.
+
+_PENDING_MAX_ANSWER_CHARS = 60
+_PENDING_VOCAB_FIELDS = ("neighborhood", "property_type", "status", "tier", "flood_zone")
+_PENDING_BEDBATH = re.compile(
+    r"^\s*(\d+)\s*(bed|bedroom|br|bath|bathroom|ba)s?\s*$", re.IGNORECASE)
+_PENDING_MONEY = re.compile(
+    r"^\s*(?P<qual>under|below|at most|max(?:imum)?|up to|over|above|at least|min(?:imum)?)?"
+    r"\s*\$?\s*(?P<num>\d[\d,]*(?:\.\d+)?)\s*(?P<suffix>k|m)?\s*$",
+    re.IGNORECASE)
+_PENDING_GTE = ("over", "above", "at least", "min", "minimum")
+
+
+def _pending_vocab_answer(message: str) -> Optional[dict]:
+    """The answer names exactly one stored value ('Great Kills', 'sf_detached') — matched
+    case-insensitively against the cached live vocabulary. Cold cache or any ambiguity
+    (two fields claiming the value) declines, deferring to the router."""
+    vocab = chat_vocabulary.peek_values()
+    if not vocab:
+        return None
+    text = message.strip().strip(".!").lower()
+    for prefix in ("in ", "the "):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+    hits = []
+    for field in _PENDING_VOCAB_FIELDS:
+        for value in vocab.get(field, ()):
+            if str(value).lower() == text:
+                hits.append({"field": field, "op": "=", "value": str(value)})
+    return hits[0] if len(hits) == 1 else None
+
+
+def _pending_answer(message: str, pending: dict) -> Optional[dict]:
+    """Deterministically map a short bare reply onto ONE new filter, or None to decline.
+    Declining is always safe — the message just routes normally."""
+    text = (message or "").strip()
+    if not text or len(text) > _PENDING_MAX_ANSWER_CHARS or "?" in text:
+        return None
+    m = _PENDING_BEDBATH.match(text)
+    if m:
+        field = "baths" if m.group(2).lower().startswith("ba") else "beds"
+        return {"field": field, "op": "=", "value": m.group(1)}
+    m = _PENDING_MONEY.match(text)
+    if m:
+        value = float(m.group("num").replace(",", ""))
+        suffix = (m.group("suffix") or "").lower()
+        if suffix == "k":
+            value *= 1_000
+        elif suffix == "m":
+            value *= 1_000_000
+        qual = (m.group("qual") or "").lower()
+        if not qual and "$" not in text and not suffix and value < 1000:
+            return None       # a bare small number ("3") is not unambiguously a price
+        op = ">=" if qual in _PENDING_GTE else "<="
+        return {"field": "list_price", "op": op, "value": str(int(value))}
+    return _pending_vocab_answer(text)
+
+
+def _pending_context(pending: dict) -> str:
+    parts = _render_filter_parts(pending.get("filters") or [])
+    question = pending.get("question") or ""
+    bits = []
+    if question:
+        bits.append(f'I just asked them: "{question}"')
+    if parts:
+        bits.append(f"their partial search so far: {parts}")
+    return "; ".join(bits)
+
+
+def _analyze_rows(message: str, rows, *, backend, store, user_id):
+    """The analyst pass: ONE bounded second model call over the rows a safe query already
+    returned. The packet is ALWAYS read-level redacted — an owner's private notes never
+    reach a model provider regardless of who is asking. Additive by design: returns
+    (analysis, note), either None-able, and never raises — the rows are the answer either
+    way."""
+    if backend is None:
+        return None, None
+    if len(rows) > chat_policy.MAX_ROWS_RENDERED:
+        return None, "Too many matches to analyze — narrow the search and ask again."
+    packet = "\n".join(format_listing_brief(r)
+                       for r in chat_policy.redact_rows(rows, "read"))
+    prompt = (
+        "Answer the user's question using ONLY the listing briefs below — real rows from "
+        "the user's own read-only search of local property listings. Do not invent "
+        "listings, prices, or outside facts. Be concise: a short paragraph.\n\n"
+        f"User: {message}\n\nListings:\n{packet}"
+    )
+    try:
+        answer = backend.query_spec(prompt, reasoning_contract.ANALYST_ANSWER_SCHEMA)
+    except Exception:  # noqa: BLE001 — analysis is additive; degrade to the plain answer
+        return None, None
+    if not isinstance(answer, dict) or set(answer) != {"reply"}:
+        return None, None
+    analysis = chat_policy.clamp_reply(answer.get("reply"))
+    if not analysis:
+        return None, None
+    usage.record_backend_call(store, backend, user_id, job="chat_analyze")
+    return analysis, None
+
+
 def _database_reply(user_id: int, name, message: str, *, store, prefs: dict,
                     spec: reasoning_contract.RouteSpec | None, backend,
                     session_store: chat_sessions.SessionStore | None = None,
-                    followup_keys=None, pending_usage=None) -> Reply:
+                    followup_keys=None, pending_usage=None,
+                    analyst_backend=None) -> Reply:
     """The only Phase 3 branch allowed to construct database-facing objects."""
     access = Access(store)
     ro = ReadOnlyStore(store)
@@ -321,22 +488,44 @@ def _database_reply(user_id: int, name, message: str, *, store, prefs: dict,
         # any earlier.
         pending_chosen, pending_last_usage = pending_usage
         if pending_chosen is not None:
-            from .usage import Usage
-            Usage(store).record(user_id, pending_chosen, job="chat_invalid",
-                                usage=pending_last_usage)
-    nl.record_usage(store, backend, user_id, job="chat")
+            usage.Usage(store).record(user_id, pending_chosen, job="chat_invalid",
+                                      usage=pending_last_usage)
+    usage.record_backend_call(store, backend, user_id, job="chat")
     chosen = getattr(backend, "chosen", None)
     safe = chat_policy.sanitize_spec({
         "filters": spec.filters,
         "sort": spec.sort,
         "order": spec.order,
         "limit": spec.limit,
-    }, level)
+        "aggregate": spec.aggregate,
+        "aggregate_field": spec.aggregate_field,
+        "group_by": spec.group_by,
+    }, level, vocab=chat_vocabulary.peek_values())
     if any(reason.startswith(_FAIL_CLOSED_DROPS) for reason in safe.dropped):
         return _split(chat_vocabulary.safe_clarify_with_examples(), "clarify",
                       backend=chosen, dropped=safe.dropped)
 
     reply = chat_policy.clamp_reply(spec.reply)
+    if safe.corrections:
+        note = " ".join(f'(assuming "{new}" for "{given}")'
+                        for _, given, new in safe.corrections)
+        reply = f"{reply} {note}".strip() if reply else note
+    if safe.aggregate:
+        try:
+            agg_rows = query.run_aggregate(ro, safe.filters, safe.aggregate,
+                                           safe.aggregate_field, safe.group_by)
+        except Exception:  # noqa: BLE001 - sanitize should prevent this
+            return _split("I built a query I couldn't run. Try rephrasing?", "error",
+                          backend=chosen, dropped=safe.dropped)
+        if session_store is not None:
+            try:
+                # Keep the filters (not keys — an aggregate has none) so "now show them"
+                # style follow-ups can replay the same scope.
+                session_store.save(user_id, filters=safe.filters, listing_keys=[])
+            except Exception:  # noqa: BLE001 — memory must never block an answer
+                pass
+        return _split(_render_aggregate(agg_rows, safe, reply), "database_aggregate",
+                      backend=chosen, dropped=safe.dropped)
     try:
         rows = query.run(ro, filters=safe.filters, sort=safe.sort,
                          order=safe.order, limit=safe.limit)
@@ -362,6 +551,17 @@ def _database_reply(user_id: int, name, message: str, *, store, prefs: dict,
         except Exception:
             # Session convenience can never block or alter a database answer.
             pass
+    if spec.analyze:
+        analysis, note = _analyze_rows(message, rows,
+                                       backend=analyst_backend or backend,
+                                       store=store, user_id=user_id)
+        if analysis:
+            return _split(f"{analysis}\n\n{_render_rows(rows, lead, level)}",
+                          "query_analysis", backend=chosen, dropped=safe.dropped,
+                          rows=tuple(rows))
+        if note:
+            return _split(f"{_render_rows(rows, lead, level)}\n\n{note}", "query",
+                          backend=chosen, dropped=safe.dropped, rows=tuple(rows))
     return _split(_render_rows(rows, lead, level), "query",
                   backend=chosen, dropped=safe.dropped, rows=tuple(rows))
 
@@ -482,76 +682,11 @@ def _market_comparison_reply(user_id: int, name, *, store, plan, backend, provid
                   backend=getattr(backend, "chosen", None))
 
 
-# --- pre-route detectors (deterministic, zero-model) --------------------------------------------
-
-_SHOW_ALL_ACTIVE = re.compile(
-    r"\b(?:show|list|produce|get|give)\b.*\b(?:all|every)\b.*\bactive\b|\b(?:all|every)\b.*\bactive\b.*\b(?:listing|listings|home|homes|property|properties)\b",
-    re.IGNORECASE,
-)
-
-_AVERAGE_PRICE = re.compile(
-    r"\b(?:average|mean)\b.*\b(?:price|cost|list\s+price)\b|\b(?:price|cost)\b.*\b(?:average|mean)\b",
-    re.IGNORECASE,
-)
-# Exclude comparison-like phrases from simple average price detection
-_AVERAGE_PRICE_EXCLUDE = re.compile(
-    r"\b(?:versus|vs\.?|compare|comparison|versus|exclud|outside|not\s+in|minus|rest\s+of)\b",
-    re.IGNORECASE,
-)
-
-_BEST_DEAL = re.compile(
-    r"\bbest\s+deal\b|\bgreat\s+deal\b|\bgood\s+deal\b|\bvalue\s+(?:pick|buy|home|property)\b",
-    re.IGNORECASE,
-)
-
-_RECENTLY_SOLD = re.compile(
-    r"\brecently\s+sold\b|\bjust\s+sold\b|\bsold\s+recently\b|\blatest\s+sold\b",
-    re.IGNORECASE,
-)
-
-_NEW_LISTINGS_RECENT = re.compile(
-    r"\bnew\s+listing\b.*\b(?:last|past|recent)\b.*\b\d+\s*(?:day|days|week|weeks)\b|\b(?:last|past|recent)\b.*\b\d+\s*(?:day|days|week|weeks)\b.*\bnew\s+listing\b|\bnew\s+listings\b.*\b(?:last|past|recent)\b.*\b\d+\s*(?:day|days|week|weeks)\b|\b(?:last|past|recent)\b.*\b\d+\s*(?:day|days|week|weeks)\b.*\bnew\s+listings\b",
-    re.IGNORECASE,
-)
-
-
-def _is_show_all_active(message: str) -> bool:
-    return bool(_SHOW_ALL_ACTIVE.search(message))
-
-
-def _is_average_price(message: str) -> bool:
-    if _AVERAGE_PRICE_EXCLUDE.search(message):
-        return False
-    return bool(_AVERAGE_PRICE.search(message))
-
-
-def _is_best_deal(message: str) -> bool:
-    return bool(_BEST_DEAL.search(message))
-
-
-def _is_recently_sold(message: str) -> bool:
-    return bool(_RECENTLY_SOLD.search(message))
-
-
-def _is_new_listings_recent(message: str) -> bool:
-    return bool(_NEW_LISTINGS_RECENT.search(message))
-
-
-def _extract_days(message: str, default: int = 7) -> int:
-    """Extract number of days from 'last N days' or 'past N days' patterns."""
-    match = re.search(r"\b(?:last|past|recent)\s+(\d+)\s*(?:day|days|week|weeks)\b", message, re.IGNORECASE)
-    if not match:
-        return default
-    n = int(match.group(1))
-    if "week" in match.group(0).lower():
-        n *= 7
-    return n
-
-
 # --- the handler ----------------------------------------------------------------------------------
 
 def handle(user_id, name, text, *, store, prefs=None, backend=None,
-           web_provider=None, session_store=None, now=None) -> Reply:
+           web_provider=None, session_store=None, now=None,
+           analyst_backend=None) -> Reply:
     """Answer one inbound message. Never raises; every failure becomes a Reply.
 
     `store` is touched only by the database route. `backend` and `web_provider` are
@@ -612,12 +747,37 @@ def handle(user_id, name, text, *, store, prefs=None, backend=None,
     if reasoning_contract.disallowed(message):
         return _split(reasoning_contract.SAFE_CLARIFY, "clarify")
 
-    # --- pre-routes: deterministic handlers for common intents (zero model calls) ---
-    # These run BEFORE local_aggregates/market_comparison so simple phrases work.
+    # A pending clarification (the router asked one question last turn) is consumed
+    # one-shot HERE — after commands/blocklist, before every pre-route — so the bare
+    # answer "Great Kills" can't be shadowed, and an unrelated next message drops the
+    # pending instead of resurrecting it later.
+    pending = None
+    if session_store is not None:
+        try:
+            pending = session_store.consume_pending(user_id)
+        except Exception:  # noqa: BLE001 — memory must never block an answer
+            pending = None
+    if pending:
+        answer = _pending_answer(message, pending)
+        if answer is not None:
+            merged = [f for f in pending["filters"]
+                      if f.get("field") != answer["field"]] + [answer]
+            spec = reasoning_contract.RouteSpec(
+                route=reasoning_contract.DATABASE_QUERY,
+                reply=f"Got it — {query.describe_filter(answer)}:",
+                filters=merged,
+                sort=pending["sort"], order=pending["order"], limit=pending["limit"],
+                web_queries=(), valid=True)
+            return _database_reply(user_id, name, message, store=store, prefs=prefs,
+                                   spec=spec, backend=None, session_store=session_store,
+                                   followup_keys=followup_keys)
+        # Not a recognizable bare answer: route normally, but let the router see the
+        # question it asked (OPTIONAL context — same ignore-if-unrelated contract).
+        pending_context = _pending_context(pending)
+        if pending_context:
+            followup_context = pending_context
 
-    if _is_average_price(message):
-        # Delegate to existing overall price aggregate handler
-        return _overall_price_reply(user_id, name, message, store=store)
+    # --- pre-routes: deterministic handlers for common intents (zero model calls) ---
 
     aggregate = local_aggregates.classify(message)
     if not isinstance(aggregate, str) and aggregate is not None:
@@ -634,84 +794,6 @@ def handle(user_id, name, text, *, store, prefs=None, backend=None,
     if comparison is not None:
         return _market_comparison_reply(user_id, name, store=store, plan=comparison,
                                         backend=backend, provider=web_provider)
-
-    # --- more pre-routes (after market_comparison to avoid intercepting comparisons) ---
-
-    if _is_show_all_active(message):
-        # "All" must MEAN all: the old limit=100 fetched a quarter of the pool and the
-        # renderer's "…and N more" trailer then undercounted the rest. Fetch everything;
-        # the renderer still shows MAX_ROWS_RENDERED and reports the true remainder.
-        spec = reasoning_contract.RouteSpec(
-            route=reasoning_contract.DATABASE_QUERY,
-            reply="All active listings:",
-            filters=[{"field": "status", "op": "=", "value": "active"}],
-            sort="rank",
-            order="asc",
-            limit=2000,
-            web_queries=(),
-            valid=True,
-        )
-        return _database_reply(user_id, name, message, store=store, prefs=prefs,
-                               spec=spec, backend=None, session_store=session_store,
-                               followup_keys=followup_keys)
-
-    if _is_average_price(message):
-        # Delegate to existing overall price aggregate handler
-        return _overall_price_reply(user_id, name, message, store=store)
-
-    if _is_best_deal(message):
-        # Sort by price_per_sqft asc (best value per sqft) as proxy for "best deal"
-        spec = reasoning_contract.RouteSpec(
-            route=reasoning_contract.DATABASE_QUERY,
-            reply="Best value homes (lowest price per sqft):",
-            filters=[{"field": "status", "op": "=", "value": "active"}],
-            sort="price_per_sqft",
-            order="asc",
-            limit=10,
-            web_queries=(),
-            valid=True,
-        )
-        return _database_reply(user_id, name, message, store=store, prefs=prefs,
-                               spec=spec, backend=None, session_store=session_store,
-                               followup_keys=followup_keys)
-
-    if _is_recently_sold(message):
-        # Sold listings, sorted by sold_date desc, up to 20 results
-        spec = reasoning_contract.RouteSpec(
-            route=reasoning_contract.DATABASE_QUERY,
-            reply="Recently sold homes:",
-            filters=[{"field": "status", "op": "=", "value": "sold"}],
-            sort="sold_date",
-            order="desc",
-            limit=20,
-            web_queries=(),
-            valid=True,
-        )
-        return _database_reply(user_id, name, message, store=store, prefs=prefs,
-                               spec=spec, backend=None, session_store=session_store,
-                               followup_keys=followup_keys)
-
-    if _is_new_listings_recent(message):
-        # Active listings with first_seen_date genuinely in the last N days. The previous
-        # spec only sorted by date while the lead text PROMISED a filtered window — a
-        # wrong answer presented as a filtered one.
-        days = _extract_days(message)
-        from datetime import date as _date, timedelta as _timedelta
-        cutoff = (_date.today() - _timedelta(days=days)).isoformat()
-        spec = reasoning_contract.RouteSpec(
-            route=reasoning_contract.DATABASE_QUERY,
-            reply=f"New listings from the last {days} days:",
-            filters=[{"field": "status", "op": "=", "value": "active"},
-                     {"field": "first_seen_date", "op": ">=", "value": cutoff}],
-            sort="first_seen_date",
-            order="desc",
-            limit=20,
-            web_queries=(),
-            valid=True,
-        )
-        return _database_reply(user_id, name, message, store=store, prefs=prefs,
-                               spec=spec, backend=None, session_store=session_store,
-                               followup_keys=followup_keys)
 
     # Deliberately omit actor/store: route selection cannot consult access, usage, or listings.
     if backend is None:
@@ -754,8 +836,23 @@ def handle(user_id, name, text, *, store, prefs=None, backend=None,
         if not spec.valid:
             return _split(chat_vocabulary.safe_clarify_with_examples(), "clarify")
     if spec.route == reasoning_contract.CLARIFY:
-        return _split(chat_policy.clamp_reply(spec.reply)
-                      or chat_vocabulary.safe_clarify_with_examples(), "clarify")
+        question = chat_policy.clamp_reply(spec.reply)
+        if session_store is not None and spec.filters:
+            # The router understood part of a search and asked for the missing piece —
+            # hold the understood part (sanitized at 'read', like everything stored) so
+            # the user's next bare answer can complete it. Pre-route clarifies never
+            # reach here and never create pendings.
+            partial = chat_policy.sanitize_spec({
+                "filters": spec.filters, "sort": spec.sort,
+                "order": spec.order, "limit": spec.limit}, "read")
+            if partial.filters:
+                try:
+                    session_store.save_pending(
+                        user_id, filters=partial.filters, sort=partial.sort,
+                        order=partial.order, limit=partial.limit, question=question)
+                except Exception:  # noqa: BLE001 — memory must never block an answer
+                    pass
+        return _split(question or chat_vocabulary.safe_clarify_with_examples(), "clarify")
     if spec.route == reasoning_contract.GENERAL_REASONING:
         reply = chat_policy.clamp_reply(spec.reply)
         return _split(reply or chat_vocabulary.safe_clarify_with_examples(),
@@ -764,4 +861,5 @@ def handle(user_id, name, text, *, store, prefs=None, backend=None,
         return _web_reply(message, spec, backend=backend, provider=web_provider)
     return _database_reply(user_id, name, message, store=store, prefs=prefs,
                            spec=spec, backend=backend, session_store=session_store,
-                           followup_keys=followup_keys, pending_usage=pending_usage)
+                           followup_keys=followup_keys, pending_usage=pending_usage,
+                           analyst_backend=analyst_backend)

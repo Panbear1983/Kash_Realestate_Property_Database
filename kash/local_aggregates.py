@@ -17,6 +17,13 @@ _ALL_LISTINGS = re.compile(
     re.IGNORECASE,
 )
 
+#: Non-price measures the router's aggregate vocabulary can average — their presence means
+#: the question is a real (scoped) aggregate, not the bare "what is the average?".
+_MEASURABLE = re.compile(
+    r"\b(?:sqft|square\s+f(?:oo|ee)t|rent|year\s+built|days\s+on\s+market)\b",
+    re.IGNORECASE,
+)
+
 SAFE_CLARIFY = "Please specify a supported aggregate, for example: average list price of the entire database."
 
 
@@ -27,12 +34,17 @@ class OverallPricePlan:
 
 
 def classify(message: str) -> OverallPricePlan | str | None:
-    """Recognize one safe aggregate, clarify incomplete aggregate phrasing, otherwise no match."""
+    """Recognize the whole-pool average, clarify the bare/underspecified ones, and return
+    None for SCOPED averages ("average price in Great Kills", "average sqft…") — those now
+    belong to the router's whitelisted aggregate vocabulary, which can actually scope them.
+    Answering a scoped average with the whole-pool number was a wrong answer presented as
+    a right one."""
     text = str(message or "")
     if not _AVERAGE.search(text):
         return None
-    if _PRICE.search(text) and _ALL_LISTINGS.search(text):
+    has_price = bool(_PRICE.search(text))
+    if has_price and _ALL_LISTINGS.search(text):
         return OverallPricePlan()
-    if not _PRICE.search(text) or not _ALL_LISTINGS.search(text):
-        return SAFE_CLARIFY
-    return None
+    if has_price or _MEASURABLE.search(text):
+        return None
+    return SAFE_CLARIFY

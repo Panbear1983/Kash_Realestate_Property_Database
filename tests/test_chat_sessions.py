@@ -97,6 +97,89 @@ def test_stored_filter_count_and_shape_are_bounded():
         directory.cleanup()
 
 
+def test_pending_is_one_shot_and_expires_on_its_own_shorter_ttl():
+    directory, sessions = _store()
+    with directory:
+        sessions.save_pending(1, filters=[_f("beds", "=", "3")], question="Budget?", now=0)
+        assert sessions.consume_pending(1, now=301) is None      # expired (300s TTL)
+        sessions.save_pending(1, filters=[_f("beds", "=", "3")], question="Budget?", now=0)
+        pending = sessions.consume_pending(1, now=299)
+        assert pending["filters"] == [_f("beds", "=", "3")]
+        assert pending["question"] == "Budget?"
+        assert sessions.consume_pending(1, now=299) is None      # one-shot
+
+
+def test_pending_with_only_private_filters_is_never_saved():
+    directory, sessions = _store()
+    with directory:
+        sessions.save_pending(1, filters=[_f("my_notes", "contains", "divorce")],
+                              question="Q?", now=0)
+        assert sessions.consume_pending(1, now=1) is None
+
+
+def test_a_doctored_pending_payload_is_dropped_on_load():
+    import json
+    import sqlite3
+    directory, sessions = _store()
+    with directory:
+        sessions.save_pending(1, filters=[_f("beds", "=", "3")], question="Q?", now=0)
+        con = sqlite3.connect(sessions.path)
+        for evil in ("not json at all",
+                     json.dumps({"filters": [{"field": "my_notes", "op": "contains",
+                                              "value": "x"}],
+                                 "sort": "rank", "order": "asc", "limit": 20,
+                                 "question": "Q?"}),
+                     json.dumps({"filters": "junk", "sort": 1, "order": [], "limit": "x",
+                                 "question": None})):
+            con.execute("UPDATE private_sessions SET pending_json=?, pending_expires_at=?"
+                        " WHERE user_id=1", (evil, 10_000))
+            con.commit()
+            assert sessions.consume_pending(1, now=0) is None, evil
+        con.close()
+
+
+def test_pending_survives_and_migrates_a_pre_pending_schema_file():
+    import sqlite3
+    directory = tempfile.TemporaryDirectory()
+    with directory:
+        path = os.path.join(directory.name, "sessions.sqlite")
+        con = sqlite3.connect(path)
+        con.execute("CREATE TABLE private_sessions (user_id INTEGER PRIMARY KEY,"
+                    " filters_json TEXT NOT NULL, listing_keys_json TEXT NOT NULL,"
+                    " selected_key TEXT, expires_at INTEGER NOT NULL)")
+        con.execute("INSERT INTO private_sessions VALUES (1, '[]', '[\"k\"]', NULL,"
+                    " 9999999999)")
+        con.commit()
+        con.close()
+        sessions = SessionStore(path)
+        assert sessions.load(1)["listing_keys"] == ("k",)        # old row still readable
+        sessions.save_pending(1, filters=[_f("beds", "=", "3")], question="Q?", now=0)
+        assert sessions.consume_pending(1, now=1)["filters"] == [_f("beds", "=", "3")]
+        assert sessions.load(1)["listing_keys"] == ("k",)        # untouched by the pending
+
+
+def test_save_pending_extends_a_nearly_expired_session_row():
+    directory, sessions = _store()
+    with directory:
+        sessions.save(1, filters=[], listing_keys=["k"], now=0)   # expires at 1800
+        sessions.save_pending(1, filters=[_f("beds", "=", "3")], question="Q?", now=1799)
+        # At t=1900 the original session TTL has lapsed but the pending (1799+300) has not.
+        assert sessions.consume_pending(1, now=1900) is not None
+
+
+def test_or_group_filters_round_trip_and_malformed_groups_drop():
+    directory, sessions = _store()
+    with directory:
+        good = {"field": "neighborhood", "op": "=", "value": "",
+                "values": ["Great Kills", "Annadale"]}
+        bad_op = {"field": "list_price", "op": "<", "value": "", "values": ["1", "2"]}
+        bad_vals = {"field": "neighborhood", "op": "=", "value": "", "values": [["nested"]]}
+        private = {"field": "my_notes", "op": "contains", "value": "", "values": ["x"]}
+        sessions.save(1, filters=[good, bad_op, bad_vals, private], listing_keys=["k"])
+        loaded = sessions.load(1)
+        assert loaded["filters"] == [good]
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in tests:

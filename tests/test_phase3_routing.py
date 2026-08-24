@@ -19,8 +19,8 @@ ROW_SECRET = "ROW_SENTINEL_MUST_NEVER_REACH_MODEL"
 
 
 def _route(route, *, reply="", filters=None, sort="rank", order="asc", limit=20,
-           web_queries=None):
-    return {
+           web_queries=None, analyze=None):
+    spec = {
         "route": route,
         "reply": reply,
         "filters": [] if filters is None else filters,
@@ -29,6 +29,9 @@ def _route(route, *, reply="", filters=None, sort="rank", order="asc", limit=20,
         "limit": limit,
         "web_queries": [] if web_queries is None else web_queries,
     }
+    if analyze is not None:
+        spec["analyze"] = analyze
+    return spec
 
 
 class FakeModel:
@@ -108,6 +111,174 @@ def test_route_schema_has_only_the_four_routes_and_is_strict():
     extra = _route("general_reasoning", reply="hello")
     extra["tool"] = "database"
     assert rc.parse(extra).valid is False
+
+
+def test_parse_accepts_the_legacy_seven_key_shape_with_empty_aggregate_defaults():
+    spec = rc.parse(_route("database_query"))
+    assert spec.valid
+    assert (spec.aggregate, spec.aggregate_field, spec.group_by) == ("", "", "")
+
+
+def test_parse_accepts_the_widened_shape():
+    full = _route("database_query")
+    full.update({"aggregate": "count", "aggregate_field": "", "group_by": "neighborhood"})
+    spec = rc.parse(full)
+    assert spec.valid
+    assert (spec.aggregate, spec.group_by) == ("count", "neighborhood")
+
+
+def test_parse_defaults_none_new_keys_and_fails_closed_on_wrong_types():
+    with_none = _route("database_query")
+    with_none.update({"aggregate": None, "aggregate_field": None, "group_by": None})
+    parsed = rc.parse(with_none)
+    assert parsed.valid and parsed.aggregate == ""
+    bad = _route("database_query")
+    bad["aggregate"] = 7
+    assert rc.parse(bad).valid is False
+
+
+def test_a_grouped_aggregate_answers_with_numbers_never_rows():
+    store = _store()
+    store.upsert({"street_address": "9 Annadale Ave", "zip": "10312", "list_price": 825000,
+                  "status": "active", "neighborhood": "Annadale",
+                  "my_notes": ROW_SECRET}, "fixture")
+    full = _route("database_query", reply="Counts per neighborhood:",
+                  filters=[{"field": "status", "op": "=", "value": "active", "values": []}])
+    full.update({"aggregate": "count", "aggregate_field": "", "group_by": "neighborhood"})
+    model = FakeModel(full)
+    chat.reset_throttle()
+    reply = chat.handle(USER, "T", "how many active homes per neighborhood?", store=store,
+                        prefs=PREFS, backend=model, web_provider=Bomb())
+    assert reply.kind == "database_aggregate"
+    assert "Annadale: 1 home" in reply.text
+    assert ROW_SECRET not in reply.text
+    assert ROW_SECRET not in model.calls[0][0]
+    assert not reply.rows
+
+
+def test_a_scoped_average_is_no_longer_answered_with_the_whole_pool_number():
+    """'average price in Great Kills' used to be intercepted by a regex pre-route that
+    returned the whole-pool average — a wrong answer presented as right. It now reaches
+    the router's aggregate vocabulary."""
+    store = _store()
+    store.upsert({"street_address": "3 Great Kills Rd", "zip": "10308", "list_price": 500000,
+                  "status": "active", "neighborhood": "Great Kills"}, "fixture")
+    full = _route("database_query", reply="Average in Great Kills:",
+                  filters=[{"field": "neighborhood", "op": "=", "value": "Great Kills",
+                            "values": []}])
+    full.update({"aggregate": "avg", "aggregate_field": "list_price", "group_by": ""})
+    model = FakeModel(full)
+    chat.reset_throttle()
+    reply = chat.handle(USER, "T", "what's the average price in Great Kills?", store=store,
+                        prefs=PREFS, backend=model, web_provider=Bomb())
+    assert reply.kind == "database_aggregate"
+    assert len(model.calls) == 1, "must be routed by the model, not a pre-route"
+    assert "$500,000" in reply.text
+
+
+def test_an_or_group_filter_returns_homes_from_both_neighborhoods():
+    store = _store()
+    for hood, price in (("Great Kills", 700000), ("Annadale", 750000),
+                        ("Eltingville", 600000)):
+        store.upsert({"street_address": f"5 {hood} St", "zip": "10308",
+                      "list_price": price, "status": "active",
+                      "neighborhood": hood}, "fixture")
+    full = _route("database_query", reply="In either neighborhood:",
+                  filters=[{"field": "neighborhood", "op": "=", "value": "",
+                            "values": ["Great Kills", "Annadale"]}])
+    model = FakeModel(full)
+    chat.reset_throttle()
+    reply = chat.handle(USER, "T", "homes in Great Kills or Annadale", store=store,
+                        prefs=PREFS, backend=model, web_provider=Bomb())
+    assert reply.kind == "query"
+    hoods = {r.get("neighborhood") for r in reply.rows}
+    assert hoods == {"Great Kills", "Annadale"}
+
+
+def test_an_invalid_aggregate_spec_fails_closed_to_clarify():
+    full = _route("database_query", reply="Median:")
+    full.update({"aggregate": "median", "aggregate_field": "list_price", "group_by": ""})
+    model = FakeModel(full)
+    chat.reset_throttle()
+    reply = chat.handle(USER, "T", "median price of homes", store=_store(), prefs=PREFS,
+                        backend=model, web_provider=Bomb())
+    assert reply.kind == "clarify"
+
+
+# --- the analyst pass (analyze=true on database_query) -----------------------------------
+# The one deliberate relaxation of "the model never sees rows": the SECOND call may see the
+# rows a safe query already returned — ALWAYS read-level redacted, bounded, and optional.
+
+def test_parse_analyze_defaults_false_and_fails_closed_on_non_bool():
+    assert rc.parse(_route("database_query")).analyze is False
+    assert rc.parse(_route("database_query", analyze=None)).analyze is False
+    assert rc.parse(_route("database_query", analyze=True)).analyze is True
+    assert rc.parse(_route("database_query", analyze="yes")).valid is False
+
+
+def test_analyst_packet_is_read_level_redacted_even_for_the_owner():
+    from kash import chat_policy
+    store = _store()
+    Access(store).edit(USER, access_level="owner")
+    store.upsert({"street_address": "7 Phase Three Lane", "zip": "10308",
+                  "analysis": ROW_SECRET, "target_buy_price": 640000,
+                  "investment_thesis": ROW_SECRET}, "fixture")
+    model = FakeModel(_route("database_query", reply="Here:", analyze=True),
+                      {"reply": "The Phase Three Lane home is the strongest value."})
+    chat.reset_throttle()
+    reply = chat.handle(USER, "T", "which home is the strongest value for me?",
+                        store=store, prefs=PREFS, backend=model, web_provider=Bomb())
+    assert reply.kind == "query_analysis"
+    assert "strongest value" in reply.text
+    assert len(model.calls) == 2
+    packet_prompt = model.calls[1][0]
+    assert "7 Phase Three Lane" in packet_prompt        # the row itself IS in the packet
+    assert ROW_SECRET not in packet_prompt              # ...but never a private field value
+    assert "640000" not in packet_prompt
+    for name in chat_policy.PRIVATE_FIELDS:             # ...nor even a private field NAME
+        assert name not in packet_prompt, name
+
+
+def test_analyst_never_fires_outside_the_database_route():
+    for route in ("general_reasoning", "clarify"):
+        model = FakeModel(_route(route, reply="An answer.", analyze=True))
+        chat.reset_throttle()
+        chat.handle(USER, "T", "tell me something", store=Bomb(), prefs=PREFS,
+                    backend=model, web_provider=Bomb())
+        assert len(model.calls) == 1, route
+
+
+def test_a_plain_database_query_never_makes_a_second_call():
+    model = FakeModel(_route("database_query", reply="Here:"))
+    chat.reset_throttle()
+    reply = chat.handle(USER, "T", "homes in 10308", store=_store(), prefs=PREFS,
+                        backend=model, web_provider=Bomb())
+    assert reply.kind == "query"
+    assert len(model.calls) == 1
+
+
+def test_analyst_declines_over_the_row_cap_with_no_second_call():
+    store = _store()
+    for i in range(30):
+        store.upsert({"street_address": f"{i} Cap St", "zip": "10308",
+                      "list_price": 600000 + i, "status": "active"}, "fixture")
+    model = FakeModel(_route("database_query", reply="All:", limit=100, analyze=True))
+    chat.reset_throttle()
+    reply = chat.handle(USER, "T", "evaluate the homes for me", store=store, prefs=PREFS,
+                        backend=model, web_provider=Bomb())
+    assert reply.kind == "query"
+    assert len(model.calls) == 1
+    assert "too many" in reply.text.lower()
+
+
+def test_analyst_failure_degrades_to_the_plain_row_answer():
+    for second in (RuntimeError("backend down"), {"unexpected": "shape"}, {"reply": ""}):
+        model = FakeModel(_route("database_query", reply="Here:", analyze=True), second)
+        chat.reset_throttle()
+        reply = chat.handle(USER, "T", "which home is strongest?", store=_store(),
+                            prefs=PREFS, backend=model, web_provider=Bomb())
+        assert reply.kind == "query", second
+        assert "7 Phase Three Lane" in reply.text
 
 
 def test_general_reasoning_has_no_database_or_web_access():

@@ -49,6 +49,14 @@ Give me the Zillow links for the cheapest active listings.
 
 Kash provides a clickable link when a valid stored listing link is available. If the database does not have one, it should say so rather than inventing a link.
 
+### Search more than one area at once
+
+```text
+Show me homes in Great Kills or Annadale under $800k.
+```
+
+Either-or searches work for neighborhoods, home types, and statuses.
+
 ### Ask about the database
 
 ```text
@@ -56,14 +64,30 @@ What is the average price of the entire database?
 ```
 
 ```text
-What is the cheapest active listing in the database?
+What is the average price in Great Kills?
 ```
 
 ```text
-Show active listings in Great Kills sorted from lowest price to highest.
+How many active listings are there in each neighborhood?
 ```
 
-Kash labels the important distinction between active listings and all stored listings, and between asking/list price and verified sale price.
+```text
+What is the average price by property type?
+```
+
+Counts, averages, minimums, and maximums work — overall, for one area, or broken down per neighborhood, property type, status, or tier. Kash labels the important distinction between active listings and all stored listings, and between asking/list price and verified sale price.
+
+### Ask for judgment about results
+
+```text
+Show 3-bedroom homes under $750k in Great Kills and tell me which is the best value.
+```
+
+```text
+Compare the two-family homes under $800k for me.
+```
+
+When you ask for a comparison or a recommendation about your search results, Kash lists the homes and adds a short reasoned take — based only on the listings it just showed you, never invented facts.
 
 ### Ask practical questions
 
@@ -106,24 +130,22 @@ Instead of:  Find a rental property.
 Try:         Find active two-family homes around $700k that may have rental potential.
 ```
 
-Kash is being improved to understand more flexible language. At present, clear location, price, property type, and desired output produce the most reliable database results.
+Misspellings are fine: "homes in Anadale" finds Annadale, and Kash notes the correction so you can see what it assumed.
 
 ## Follow-up messages
 
-Private short-term conversation memory is **still under construction**. For now, repeat the essential conditions when asking a follow-up.
+Kash remembers your last search for about 30 minutes, so natural follow-ups work:
 
 ```text
-Instead of:  Give me the links for those.
-Use today:   Give me the links for active two-family homes under $750k in Great Kills.
-```
-
-When the session-memory feature is live, Kash will support natural follow-ups such as:
-
-```text
-Give me the links for those.
+Which of those have 3 bedrooms?
+Tell me about the second one.
+Open #3.
 Only show the cheaper ones.
-Sort those by price.
 ```
+
+For about 5 minutes after a search, you can also refine it without any special phrasing — "actually make that under $700k" continues the same search.
+
+If Kash asks you one clarifying question — say, "Which neighborhood and what budget?" — just answer it plainly: "Great Kills", "under 700k", or "3 beds" completes the search you started. Memory stores only the shape of your search (the filters), never your message text.
 
 ## Optional shortcuts for power users
 
@@ -138,8 +160,22 @@ filter status=active sort:list_price limit:5
 ```
 
 ```text
+usage
+```
+
+Shows how much of today's model budget you have used.
+
+```text
+model claude_cli
+```
+
+Pins your replies to one model backend (`model auto` returns to the default ladder).
+
+```text
 help
 ```
+
+Contributors have additional `/propose` and `/mine` commands — see the contributor guides in `docs/`.
 
 ## What Kash will not do
 

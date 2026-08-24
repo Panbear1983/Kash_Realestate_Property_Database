@@ -128,7 +128,8 @@ def test_unknown_names_in_ladder_are_skipped_not_fatal():
 JOB_CFG = {
     "backend": "auto",
     "ladders": {"chat": ["codex", "claude_cli"],
-                "rank": ["claude_cli", "agy_cli"]},
+                "rank": ["claude_cli", "agy_cli"],
+                "analyze": ["claude_cli", "codex"]},
     "ladder": ["codex"],
 }
 
@@ -136,6 +137,7 @@ JOB_CFG = {
 def test_each_job_gets_its_own_ladder():
     assert llm.resolve_ladder(JOB_CFG, job="chat") == ["codex", "claude_cli"]
     assert llm.resolve_ladder(JOB_CFG, job="rank") == ["claude_cli", "agy_cli"]
+    assert llm.resolve_ladder(JOB_CFG, job="analyze") == ["claude_cli", "codex"]
 
 
 def test_unnamed_job_falls_back_to_the_shared_ladder():

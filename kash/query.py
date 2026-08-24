@@ -28,12 +28,24 @@ def _cast(field: str, value):
 def _where(filters) -> tuple[list[str], list]:
     where, params = [], []
     for f in filters:
-        field, op, val = f["field"], f.get("op", "="), f["value"]
+        field, op = f["field"], f.get("op", "=")
         if field not in _FIELDS:
             raise ValueError(f"unknown field: {field}")
         sop = _OPS.get(op)
         if not sop:
             raise ValueError(f"unknown operator: {op}")
+        values = f.get("values")
+        if values:
+            # An OR group is ONE filter entry: alternatives for a single field, still one
+            # bound parameter per value. Parenthesized so it ANDs cleanly with the rest.
+            if sop == "LIKE":
+                where.append("(" + " OR ".join(f'"{field}" LIKE ?' for _ in values) + ")")
+                params.extend(f"%{v}%" for v in values)
+            else:
+                where.append("(" + " OR ".join(f'"{field}" {sop} ?' for _ in values) + ")")
+                params.extend(_cast(field, v) for v in values)
+            continue
+        val = f["value"]
         if sop == "LIKE":
             where.append(f'"{field}" LIKE ?')
             params.append(f"%{val}%")
@@ -66,6 +78,58 @@ def run(store, filters=None, sort: str = "rank", order: str = "asc", limit: int 
     return store.execute_select(sql, params)
 
 
+# --- allow-listed aggregates ------------------------------------------------------------------
+# Shared with kash.chat_policy the same way _OPS is: chat_policy imports these and applies
+# them at the spec, so a spec that reaches build_aggregate() is already clean — the raises
+# below are belt-and-braces, exactly like _where()'s. tests assert these stay equal to
+# reasoning_contract's model-facing copies.
+
+_AGG_SQL = {"count": "COUNT(*)", "avg": 'AVG("{f}")', "min": 'MIN("{f}")', "max": 'MAX("{f}")'}
+AGGREGATES = frozenset(_AGG_SQL)
+AGGREGATE_FIELDS = frozenset({"list_price", "price_per_sqft", "sqft", "days_on_market",
+                              "year_built", "estimated_rent_monthly"})
+GROUP_BY_FIELDS = frozenset({"neighborhood", "property_type", "status", "tier"})
+MAX_AGGREGATE_GROUPS = 20
+
+
+def build_aggregate(filters, aggregate: str, aggregate_field: str,
+                    group_by: str) -> tuple[str, list]:
+    """One whitelisted aggregate over the same WHERE construction as build(). The SQL shape
+    is fixed by code; the spec chooses only among the frozensets above."""
+    if aggregate not in _AGG_SQL:
+        raise ValueError(f"unknown aggregate: {aggregate}")
+    if aggregate == "count":
+        agg_sql = _AGG_SQL["count"]
+    else:
+        if aggregate_field not in AGGREGATE_FIELDS:
+            raise ValueError(f"unknown aggregate field: {aggregate_field}")
+        agg_sql = _AGG_SQL[aggregate].format(f=aggregate_field)
+    if group_by and group_by not in GROUP_BY_FIELDS:
+        raise ValueError(f"unknown group_by field: {group_by}")
+
+    where, params = _where(filters or [])
+    if aggregate != "count":
+        # Mirror price_summary: NULL/empty values are excluded, not averaged as zero.
+        where.append(f'"{aggregate_field}" IS NOT NULL')
+    if group_by:
+        sql = (f'SELECT "{group_by}" AS grp, {agg_sql} AS value, COUNT(*) AS n FROM listings')
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += (f' GROUP BY "{group_by}" ORDER BY value DESC'
+                f" LIMIT {int(MAX_AGGREGATE_GROUPS)}")
+    else:
+        sql = f"SELECT {agg_sql} AS value, COUNT(*) AS n FROM listings"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+    return sql, params
+
+
+def run_aggregate(store, filters, aggregate: str, aggregate_field: str = "",
+                  group_by: str = "") -> list[dict]:
+    sql, params = build_aggregate(filters, aggregate, aggregate_field, group_by)
+    return store.aggregate_select(sql, params)
+
+
 def build_count(filters) -> tuple[str, list]:
     """Same WHERE-clause construction as build(); a count is invariant to sort/limit."""
     where, params = _where(filters or [])
@@ -89,7 +153,9 @@ _OP_WORDS = {"=": "=", "!=": "≠", "<": "<", "<=": "≤", ">": ">", ">=": "≥"
 
 def describe_filter(f: dict) -> str:
     op = f.get("op")
-    return f"{f.get('field')} {_OP_WORDS.get(op, op)} {f.get('value')}"
+    values = f.get("values")
+    shown = " or ".join(str(v) for v in values) if values else f.get("value")
+    return f"{f.get('field')} {_OP_WORDS.get(op, op)} {shown}"
 
 
 def diagnose_empty(store, filters: list[dict], *, max_filters: int = MAX_DIAGNOSIS_FILTERS,
