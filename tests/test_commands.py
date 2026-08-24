@@ -198,6 +198,20 @@ def test_commands_never_write_to_listings():
     assert ctx.store.all() == before
 
 
+def test_show_with_search_phrasing_is_a_question_not_an_address_lookup():
+    """The old heuristic was 'any digit anywhere', so prices and bed counts ("Show me
+    active homes under $750k") were swallowed by a doomed address lookup. Bare `show` is
+    a command only for address-shaped args; /show stays explicit."""
+    for question in ("Show me active homes under $750k.",
+                     "Show 3-bedroom homes under $750k in Great Kills and tell me "
+                     "which is the best value.",
+                     "show the 5 cheapest actives and tell me the best value",
+                     "Show me the link for 25 Northfield Ave."):
+        assert not commands.is_command(question), question
+    for address in ("show 1 Fairlawn", "show 12 Bedford Ave", "/show anything"):
+        assert commands.is_command(address), address
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

@@ -17,6 +17,7 @@ because they are the documented shell syntax (see README) and are unambiguous.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -151,6 +152,25 @@ _BARE_ONLY = {"help": _cmd_help, "start": _cmd_help, "commands": _cmd_help,
               "usage": _cmd_usage}
 
 
+# A bare `show` is an address lookup only when its argument actually reads like an address:
+# a leading house number followed by a street word ("45 Fairlawn Loop"), with none of the
+# words that mark a search instead. The old check — "any digit anywhere" — swallowed
+# ordinary questions whose digits were prices or bed counts ("Show me active homes under
+# $750k", "Show 3-bedroom homes … best value") and answered them with a failed address
+# lookup. Word-bounded keywords keep street names like "Bedford" safe.
+_ADDRESS_SHAPE = re.compile(r"^\d+\s+[A-Za-z]")
+_SEARCH_WORDS = re.compile(
+    r"\b(?:home|homes|house|houses|listing|listings|bed|beds|bedroom|bedrooms|bath|baths|"
+    r"under|over|around|between|cheapest|newest|active|sold|pending|price|prices|value|"
+    r"deal|deals|sort|sorted)\b|\$",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_address(args: str) -> bool:
+    return bool(_ADDRESS_SHAPE.match(args)) and not _SEARCH_WORDS.search(args)
+
+
 def _match(text: str):
     """Return ``(handler, args)`` for an unambiguous command, otherwise ``None``.
 
@@ -187,7 +207,7 @@ def _match(text: str):
         if not slashed and args:
             if head == "model" and args.lower() not in (set(llm.BACKENDS) | {AUTO}):
                 return None
-            if head == "show" and not any(c.isdigit() for c in args):
+            if head == "show" and not _looks_like_address(args):
                 return None
         return _WITH_ARGS[head], args
 
