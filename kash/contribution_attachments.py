@@ -113,6 +113,7 @@ class AttachmentService:
             final_path.unlink(missing_ok=True)
             raise
         return {
+            "id": int(self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]),
             "proposal_id": int(proposal_id), "sha256": digest, "media_kind": suffix[1:],
             "byte_size": len(content), "status": status, "extraction": "disabled", "path": str(final_path),
         }

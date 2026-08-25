@@ -532,10 +532,15 @@ class KashDashboard(App):
         self.store = Store(DB)
         self.access = Access(self.store)
         self.contribution_roles = DataRoles(self.store)
+        from run_update import push_telegram
+        from kash.contribution_notifications import ProposalNotifier
         self.contribution_admin = ContributionAdmin(
             ContributionService(self.store, self.contribution_roles),
             ReviewQueue(self.store, self.contribution_roles),
             WorkspaceSyncAuditReadModel(self.store, self.contribution_roles),
+            # Decision pings to the submitter. Best-effort; without KASH_BOT_TOKEN the
+            # push self-degrades to "skipped" and the review action is unaffected.
+            notifier=ProposalNotifier(self.store, self.contribution_roles, push_telegram),
         )
         configured_owner = os.environ.get("KASH_CHAT_ID", "").strip()
         self.contribution_actor_id = int(configured_owner) if configured_owner.isdigit() else None

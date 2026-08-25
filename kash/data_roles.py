@@ -42,6 +42,12 @@ class DataRoles:
         )
         self.conn.commit()
 
+    def owner_ids(self) -> list[int]:
+        """Every non-revoked owner — the review-notification recipients."""
+        return [int(r[0]) for r in self.conn.execute(
+            "SELECT telegram_user_id FROM data_role_assignments"
+            " WHERE role=? AND revoked_at IS NULL", (ROLE_OWNER,))]
+
     def role_for(self, user_id):
         row = self.conn.execute(
             "SELECT role FROM data_role_assignments WHERE telegram_user_id=? AND revoked_at IS NULL",
