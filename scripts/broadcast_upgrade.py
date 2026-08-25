@@ -47,8 +47,16 @@ It keeps what you already told it and finishes the search. No starting over.
 SPELLING DOESN'T MATTER
 "Anadale" finds Annadale. Kash will tell you what it assumed.
 
+FOR CONTRIBUTORS
+Have a listing sheet or a screenshot? Just send the file to this chat —
+no commands needed. Kash reads it, shows you what it found, and after
+you confirm it goes to the owner for review. Nothing changes until the
+owner approves — and you'll get a message here when your submission is
+approved or rejected.
+
 WHAT HASN'T CHANGED
-- Kash still can't change or delete anything — it only looks things up.
+- Kash still can't change or delete anything on its own — every edit
+  goes through the owner's review.
 - Private info stays private.
 - Everything you already do still works the same.
 

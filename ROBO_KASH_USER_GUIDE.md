@@ -175,7 +175,7 @@ Pins your replies to one model backend (`model auto` returns to the default ladd
 help
 ```
 
-Contributors have additional `/propose` and `/mine` commands — see the contributor guides in `docs/`.
+Contributors can also just send a listing sheet (PDF, Word, or screenshot) to the chat — Kash reads it, previews what it found, and stages it for owner review. Additional `/propose` and `/mine` commands are covered in the contributor guides in `docs/`.
 
 ## What Kash will not do
 
