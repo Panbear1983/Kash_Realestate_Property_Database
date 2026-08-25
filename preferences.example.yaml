@@ -60,6 +60,9 @@ llm:
     extract:
       - claude_cli
       - codex
+    intake:                # contributor waiting on a document preview — latency wins
+      - codex
+      - claude_cli
     rank:
       - codex
       - claude_cli
