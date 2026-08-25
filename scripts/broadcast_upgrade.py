@@ -47,12 +47,24 @@ It keeps what you already told it and finishes the search. No starting over.
 SPELLING DOESN'T MATTER
 "Anadale" finds Annadale. Kash will tell you what it assumed.
 
-FOR CONTRIBUTORS
-Have a listing sheet or a screenshot? Just send the file to this chat —
-no commands needed. Kash reads it, shows you what it found, and after
-you confirm it goes to the owner for review. Nothing changes until the
-owner approves — and you'll get a message here when your submission is
-approved or rejected.
+FOR CONTRIBUTORS — YOU CAN NOW ADD TO THE DATABASE
+Found a listing Kash doesn't have? Just send the listing sheet to this
+chat — a PDF, a Word doc, or a screenshot. No commands needed.
+
+Kash reads the file and replies with a preview of what it found: a new
+listing, a price correction, or a sold notice. Then:
+- Reply "/mine submit 3" (using the draft number Kash gives you) to
+  send it to the owner for review.
+- If Kash misread something, reply "/mine draft edit 3" with the fix
+  on the next lines, like: list_price: 700000
+
+Screenshots can't be read automatically — put the details in the
+caption (for example: "sold — 25 Example Ave 10308") or type them in
+when Kash asks.
+
+Nothing in the database changes until the owner approves, and you'll
+get a message here the moment your submission is approved, rejected,
+or published.
 
 WHAT HASN'T CHANGED
 - Kash still can't change or delete anything on its own — every edit
