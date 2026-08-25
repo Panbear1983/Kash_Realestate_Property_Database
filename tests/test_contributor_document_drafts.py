@@ -303,6 +303,91 @@ def test_confirming_complete_document_draft_uses_workspace_add_and_returns_guard
         assert service.list_drafts(CONTRIBUTOR) == []
 
 
+def test_docx_text_extraction_includes_table_cells_as_label_value_lines():
+    from kash.contributor_document_drafts import extract_document_text
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "sheet.docx"
+        document = Document()
+        document.add_paragraph("Charming colonial in Great Kills.")
+        table = document.add_table(rows=2, cols=2)
+        table.rows[0].cells[0].text = "list_price"
+        table.rows[0].cells[1].text = "700000"
+        table.rows[1].cells[0].text = "zip"
+        table.rows[1].cells[1].text = "10308"
+        document.save(path)
+        text = extract_document_text(path, "docx")
+        assert "Charming colonial" in text
+        assert "list_price: 700000" in text
+        assert "zip: 10308" in text
+        # ...which means the literal candidate parser now reads two-column sheets too.
+        assert extract_document_candidates(path, "docx") == {
+            "list_price": "700000", "zip": "10308"}
+
+
+def test_pdf_text_extraction_is_guarded_and_bounded():
+    from kash.contributor_document_drafts import extract_document_text
+    try:
+        from pypdf import PdfWriter
+    except ImportError:
+        print("      (pypdf not installed — pdf leg skipped, degrade path asserted)")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "x.pdf"
+            path.write_bytes(b"%PDF-1.4 broken")
+            assert extract_document_text(path, "pdf") is None
+        return
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # pypdf can write blank pages but not text runs without heavy machinery, so the
+        # positive-text case lives in the intake tests with a handcrafted content stream.
+        # Here: a malformed pdf and images both degrade to None, never raise.
+        broken = Path(tmpdir) / "broken.pdf"
+        broken.write_bytes(b"%PDF-1.4 not really a pdf")
+        assert extract_document_text(broken, "pdf") is None
+        blank = Path(tmpdir) / "blank.pdf"
+        writer = PdfWriter()
+        writer.add_blank_page(width=200, height=200)
+        with open(blank, "wb") as handle:
+            writer.write(handle)
+        assert extract_document_text(blank, "pdf") is None   # no text layer -> None
+        assert extract_document_text(blank, "png") is None   # images: by design
+
+
+def test_pdf_attachments_can_now_become_drafts():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = WorkspaceStore(Path(tmpdir) / "workspace.sqlite3", contributor_id=CONTRIBUTOR)
+        service = WorkspaceAttachmentService(workspace, quarantine_dir=Path(tmpdir) / "evidence")
+        staged = service.stage_mine(CONTRIBUTOR, None, "sheet.pdf", b"%PDF-1.4 fixture")
+        assert staged["media_kind"] == "pdf"
+        assert service.document_for_mine(CONTRIBUTOR, staged["id"])["media_kind"] == "pdf"
+        draft = workspace.create_document_draft(CONTRIBUTOR, staged["id"], {"zip": "10308"})
+        assert draft["status"] == "pending"
+
+
+def test_file_for_mine_resolves_any_owned_media_kind_with_the_same_guards():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workspace = WorkspaceStore(Path(tmpdir) / "workspace.sqlite3", contributor_id=CONTRIBUTOR)
+        service = WorkspaceAttachmentService(workspace, quarantine_dir=Path(tmpdir) / "evidence")
+        png = b"\x89PNG\r\n\x1a\n fixture"
+        staged = service.stage_mine(CONTRIBUTOR, None, "shot.png", png)
+        resolved = service.file_for_mine(CONTRIBUTOR, staged["id"])
+        assert resolved["media_kind"] == "png"
+        assert resolved["sha256"] == staged["sha256"]
+        assert Path(resolved["path"]).read_bytes() == png
+        # images are still NOT documents — the extraction path keeps refusing them
+        try:
+            service.document_for_mine(CONTRIBUTOR, staged["id"])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("an image became an extractable document")
+        # ...and another actor cannot resolve it at all
+        try:
+            service.file_for_mine(OTHER, staged["id"])
+        except (ValueError, PermissionError):
+            pass
+        else:
+            raise AssertionError("another contributor resolved a private attachment")
+
+
 if __name__ == "__main__":
     tests = [fn for name, fn in sorted(globals().items()) if name.startswith("test_") and callable(fn)]
     for test in tests:

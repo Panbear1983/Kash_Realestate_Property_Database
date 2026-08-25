@@ -202,7 +202,7 @@ class WorkspaceStore:
         values = self._draft_candidates(candidates)
         attachment = self.conn.execute(
             """SELECT id FROM workspace_attachments
-               WHERE id=? AND uploaded_by=? AND media_kind IN ('doc','docx')
+               WHERE id=? AND uploaded_by=? AND media_kind IN ('doc','docx','pdf')
                  AND status IN ('quarantined','manual_review')""",
             (int(attachment_id), int(actor_id)),
         ).fetchone()

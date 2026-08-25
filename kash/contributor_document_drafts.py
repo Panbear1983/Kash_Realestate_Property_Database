@@ -62,26 +62,76 @@ def _docx_archive_preflight(path):
     return True
 
 
+MAX_PDF_PAGES = 10
+MAX_PDF_INPUT_BYTES = 10 * 1024 * 1024   # matches the attachment staging cap
+
+
+def extract_document_text(path, media_kind, *, runner=subprocess.run):
+    """Best-effort plain text from a quarantined document, or None.
+
+    Local-only and non-interpreting: no macros, no network, no OCR. Consumers bound the
+    result themselves (`_parse_candidate_lines` enforces its own byte/line caps; the LLM
+    intake caps its prompt input). Images return None by design — there is no OCR here.
+    """
+    kind = str(media_kind).lower()
+    if kind == "docx":
+        if not _docx_archive_preflight(Path(path)):
+            return None
+        try:
+            document = Document(Path(path))
+            parts = [paragraph.text for paragraph in document.paragraphs]
+            # Listing sheets are usually tables. A two-cell row renders as `label: value`
+            # so both the literal field parser and the LLM see the association.
+            for table in document.tables:
+                for row in table.rows:
+                    cells = [cell.text.strip() for cell in row.cells]
+                    if len(cells) == 2 and cells[0] and cells[1]:
+                        parts.append(f"{cells[0]}: {cells[1]}")
+                    else:
+                        parts.append(" | ".join(c for c in cells if c))
+        except Exception:
+            return None
+        return "\n".join(parts)
+    if kind == "doc":
+        return _legacy_doc_text(path, runner)
+    if kind == "pdf":
+        return _pdf_text(Path(path))
+    return None
+
+
+def _pdf_text(path):
+    """Text layer of a PDF via pypdf, bounded; None when unreadable or pypdf is absent.
+
+    pypdf is an optional dependency (see requirements.txt): without it PDF intake degrades
+    to typed drafts rather than failing."""
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        return None
+    try:
+        if not path.is_file() or path.stat().st_size > MAX_PDF_INPUT_BYTES:
+            return None
+        reader = PdfReader(str(path), strict=False)
+        parts = []
+        for page in reader.pages[:MAX_PDF_PAGES]:
+            try:
+                parts.append(page.extract_text() or "")
+            except Exception:  # noqa: BLE001 - one broken page never sinks the document
+                continue
+        text = "\n".join(parts).strip()
+    except Exception:  # noqa: BLE001 - malformed PDFs degrade to "no text", never raise
+        return None
+    return text or None
+
+
 def extract_document_candidates(path, media_kind, *, runner=subprocess.run):
     """Return only allow-listed ``field: value`` candidates, or a safe empty result.
 
     This parser is deliberately local and non-interpreting: document prose, macros, and
     unknown fields cannot become listing data.
     """
-    kind = str(media_kind).lower()
-    if kind == "docx":
-        if not _docx_archive_preflight(Path(path)):
-            return {}
-        try:
-            paragraphs = Document(Path(path)).paragraphs
-            text = "\n".join(paragraph.text for paragraph in paragraphs)
-        except Exception:
-            return {}
-    elif kind == "doc":
-        text = _legacy_doc_text(path, runner)
-        if text is None:
-            return {}
-    else:
+    text = extract_document_text(path, media_kind, runner=runner)
+    if text is None:
         return {}
     return _parse_candidate_lines(text)
 

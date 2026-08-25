@@ -110,12 +110,33 @@ class WorkspaceAttachmentService:
         self.conn.commit()
         return len(rows)
 
+    def file_for_mine(self, actor_id, attachment_id):
+        """Resolve an owned, still-retained attachment of ANY staged media kind.
+
+        Same ownership and status checks as document_for_mine, but images qualify too —
+        used for image-evidence drafts and for re-linking the bytes to a proposal at
+        submit time (kash.document_intake)."""
+        self.workspace._require_owner(actor_id)
+        row = self.conn.execute(
+            """SELECT stored_name,media_kind,sha256 FROM workspace_attachments
+               WHERE id=? AND uploaded_by=?
+                 AND status IN ('quarantined','manual_review')""",
+            (int(attachment_id), int(actor_id)),
+        ).fetchone()
+        if not row:
+            raise ValueError("attachment is unavailable")
+        path = self.quarantine_dir / row[0]
+        if not path.is_file():
+            raise ValueError("attachment is unavailable")
+        return {"id": int(attachment_id), "media_kind": row[1], "stored_name": row[0],
+                "sha256": row[2], "path": path}
+
     def document_for_mine(self, actor_id, attachment_id):
         """Resolve an owned, still-quarantined document for internal local extraction."""
         self.workspace._require_owner(actor_id)
         row = self.conn.execute(
             """SELECT stored_name,media_kind FROM workspace_attachments
-               WHERE id=? AND uploaded_by=? AND media_kind IN ('doc','docx')
+               WHERE id=? AND uploaded_by=? AND media_kind IN ('doc','docx','pdf')
                  AND status IN ('quarantined','manual_review')""",
             (int(attachment_id), int(actor_id)),
         ).fetchone()

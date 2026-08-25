@@ -6,3 +6,8 @@ python-dotenv>=1.0,<2.0
 # Optional: only needed for the 'anthropic' LLM rung. Without it that rung reports itself
 # unavailable and the ladder falls through to codex.
 anthropic>=0.60
+# Contributor document intake. python-docx is required (contributor_document_drafts
+# imports it unconditionally); pypdf is optional — without it PDF intake degrades to
+# typed drafts instead of extracted ones.
+python-docx>=1.0,<2.0
+pypdf>=3.0,<7
