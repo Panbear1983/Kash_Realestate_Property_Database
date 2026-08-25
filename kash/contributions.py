@@ -95,7 +95,7 @@ class ContributionService:
         self._require_submitter(actor_id)
         if not str(match_key).strip():
             raise ValueError("target match_key is required")
-        fields = self._validate_fields(fields)
+        fields = self._validate_fields(fields, partial=True)
         current = self.store.get(str(match_key))
         if current is None:
             raise ValueError("correction target does not exist")
@@ -280,11 +280,19 @@ class ContributionService:
             raise ValueError("observed_at must be an ISO date") from exc
 
     @staticmethod
-    def _validate_fields(fields):
+    def _validate_fields(fields, *, partial=False):
+        """Validate types/enums via the Listing model.
+
+        ``partial=True`` (corrections) also excludes UNSET fields, mirroring the
+        workspace store's ``allow_partial``: without it, pydantic's ``status='active'``
+        default rode along on every correction payload — so a price correction against a
+        ``pending`` listing would have silently flipped it back to active at publish.
+        """
         if not isinstance(fields, dict) or not fields:
             raise ValueError("a non-empty structured field object is required")
         forbidden = sorted(set(fields) - PUBLIC_EDITABLE_FIELDS)
         if forbidden:
             raise ValueError("fields not permitted in contributor proposals: " + ", ".join(forbidden))
         # Pydantic drops unknown fields, but we rejected unknown keys above; this validates types/enums.
-        return Listing.model_validate(fields).model_dump(exclude_none=True)
+        return Listing.model_validate(fields).model_dump(exclude_none=True,
+                                                         exclude_unset=partial)

@@ -22,8 +22,11 @@ _HELP = (
     "/mine delete <listing key>\nreason: ...\n"
     "/mine draft <attachment id>\n"
     "/mine drafts\n"
+    "/mine submit <draft id>   (send a draft to the owner for review)\n"
     "/mine confirm <draft id>\n"
-    "/mine discard <draft id>"
+    "/mine discard <draft id>\n"
+    "Or just send a listing sheet (PDF/Word) or screenshot to this chat — Kash reads it "
+    "and previews a draft for you."
 )
 
 

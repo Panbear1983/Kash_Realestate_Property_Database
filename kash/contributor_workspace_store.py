@@ -200,9 +200,11 @@ class WorkspaceStore:
         """Persist an owner-only, non-listing candidate set linked to a staged document."""
         self._require_owner(actor_id)
         values = self._draft_candidates(candidates)
+        # Any staged kind may back a draft: text-bearing documents get extracted
+        # candidates, images get caption/typed ones (document_for_mine stays doc-only).
         attachment = self.conn.execute(
             """SELECT id FROM workspace_attachments
-               WHERE id=? AND uploaded_by=? AND media_kind IN ('doc','docx','pdf')
+               WHERE id=? AND uploaded_by=?
                  AND status IN ('quarantined','manual_review')""",
             (int(attachment_id), int(actor_id)),
         ).fetchone()
