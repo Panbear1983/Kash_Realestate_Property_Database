@@ -156,6 +156,19 @@ def main():
         # ageing (truncated coverage proves nothing).
         if args.limit and n == "zillow":
             cfg["results_limit"] = args.limit
+        elif n == "zillow":
+            # Pacing governor: the configured results_limit is the CEILING; tonight's
+            # actual quantity spreads the remaining cycle budget into equal nightly
+            # allowances, read live from Apify's meter. limit 0 = deliberately skip
+            # tonight (the schedule still marks the source: pace re-decides tomorrow,
+            # and hammering a skipped night with failure-backoff retries would be wrong).
+            from kash import apify_budget, apify_pacing
+            pace = apify_pacing.paced_results_limit(
+                apify_budget.month_to_date(), **apify_pacing.from_config(cfg))
+            print(f"  apify pace: {pace['reason']} -> results_limit {pace['limit']}")
+            if pace["limit"] <= 0:
+                continue
+            cfg["results_limit"] = pace["limit"]
         adapters.append(REGISTRY[n](config=cfg))
 
     result = orchestrator.update(store, prefs, adapters)

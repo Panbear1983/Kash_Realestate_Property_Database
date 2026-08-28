@@ -32,7 +32,9 @@ def month_to_date(token: Optional[str] = None, request_get=None) -> Optional[dic
         cap = float(data["limits"]["maxMonthlyUsageUsd"])
         if cap <= 0:
             return None
-        return {"used": used, "cap": cap, "pct": used / cap}
+        cycle = data.get("monthlyUsageCycle") or {}
+        return {"used": used, "cap": cap, "pct": used / cap,
+                "cycle_start": cycle.get("startAt"), "cycle_end": cycle.get("endAt")}
     except Exception:  # noqa: BLE001 — observability must never take the run down
         return None
 

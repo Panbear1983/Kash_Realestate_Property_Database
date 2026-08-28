@@ -110,9 +110,16 @@ sources:
   # waste, it just must never run on the per-result meter.
   zillow:
     every_days: 1
-    # Worst case: results_limit x $0.0023 x 31 nights ≈ $2.85/mo of the HARD $5 Apify cap.
-    # Typical with the doz filter: 15-40 fresh listings exist per week, ~$1-2/mo.
+    # results_limit is the per-night CEILING; the pacing governor (kash/apify_pacing.py)
+    # reads Apify's live meter each run and spreads the remaining cycle budget into equal
+    # nightly allowances, so the HARD $5 cap is used fully but never exhausted early.
+    # Measured cost is ~$0.008-0.009 per search result (actor compute units dominate) —
+    # 3.5x the $0.0023 this file once assumed, which is what caused the Aug 2026 blowout.
     results_limit: 40
+    est_cost_per_result: 0.009   # smoothness only; the ceiling never depends on it
+    pace_spend_target: 0.95      # stop 5% short of the hard cap
+    pace_floor: 5                # fewer affordable results than this -> skip the night
+    pace_fallback_limit: 15      # static limit when the Apify meter is unreachable
     # Zillow's days-on-Zillow filter (1/7/14/30/90): the query returns ONLY recently
     # listed homes. 7 rather than 1 so a failed night self-heals for a week and first-week
     # price cuts stay in the window. Remove the key to search all active listings again.

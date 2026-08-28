@@ -30,8 +30,19 @@ def get_returning(payload):
 
 def test_the_limits_payload_parses():
     b = apify_budget.month_to_date(token="t", request_get=get_returning(PAYLOAD))
-    assert b == {"used": 3.546132, "cap": 5.0, "pct": 3.546132 / 5.0}
+    assert b == {"used": 3.546132, "cap": 5.0, "pct": 3.546132 / 5.0,
+                 "cycle_start": None, "cycle_end": None}
     assert apify_budget.format_line(b) == "apify: $3.55 of $5.00 used this cycle (71%)"
+
+
+def test_the_cycle_window_is_carried_when_present():
+    payload = {"data": {"current": {"monthlyUsageUsd": 0.5},
+                        "limits": {"maxMonthlyUsageUsd": 5},
+                        "monthlyUsageCycle": {"startAt": "2026-08-28T00:00:00.000Z",
+                                              "endAt": "2026-09-27T23:59:59.999Z"}}}
+    b = apify_budget.month_to_date(token="t", request_get=get_returning(payload))
+    assert b["cycle_end"] == "2026-09-27T23:59:59.999Z"
+    assert b["cycle_start"] == "2026-08-28T00:00:00.000Z"
 
 
 def test_an_unwrapped_payload_also_parses():
