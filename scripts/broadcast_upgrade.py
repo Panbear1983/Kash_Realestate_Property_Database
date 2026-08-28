@@ -76,16 +76,22 @@ Just talk to it like a person. If an answer misses, say it a different way.
 Type help anytime."""
 
 
-def broadcast(store, *, apply=False, push=None, kind=KIND, message=MESSAGE) -> dict[int, str]:
-    """Send `message` once (per `kind` ledger key) to every allowed chat user.
-    Returns {user_id: outcome}. Other one-time announcements reuse this with their own
-    kind + message — see scripts/broadcast_scrape_pacing.py."""
+def broadcast(store, *, apply=False, push=None, kind=KIND, message=MESSAGE,
+              recipients=None) -> dict[int, str]:
+    """Send `message` once (per `kind` ledger key) to every allowed chat user — or, when
+    `recipients` is given, only to those of them. Returns {user_id: outcome}. Other
+    one-time announcements reuse this with their own kind + message — see
+    scripts/broadcast_scrape_pacing.py."""
     if push is None:
         push = run_update.push_telegram
     # uid 0 is the dashboard's internal actor row, not a Telegram user — sending to it
     # would fail forever and re-report on every retry. Real Telegram ids are positive.
-    recipients = [int(r["telegram_user_id"]) for r in Access(store).all()
-                  if r.get("status") == "allowed" and int(r["telegram_user_id"]) > 0]
+    allowed = [int(r["telegram_user_id"]) for r in Access(store).all()
+               if r.get("status") == "allowed" and int(r["telegram_user_id"]) > 0]
+    if recipients is not None:
+        wanted = {int(r) for r in recipients}
+        allowed = [uid for uid in allowed if uid in wanted]   # never past the allow list
+    recipients = allowed
     parts = split_text(message)
     outcomes: dict[int, str] = {}
     for uid in recipients:

@@ -22,18 +22,20 @@ from broadcast_upgrade import DEFAULT_DB, HERE, broadcast
 from kash.store import Store
 
 KIND = "broadcast:2026-08-scrape-pacing"
+KASH_ID = 5143942438          # the contributor — this note is addressed to him alone
 
-MESSAGE = """Robo Kash update: the nightly listing search just got steadier.
+MESSAGE = """Hi Kash, quick update from Robo Kash.
 
-Last month Kash's search budget ran out early, so it went quiet for a
-few nights. That's fixed: it now has its own budget, spread evenly
-across the whole month. Tottenville and the 10311/10313 ZIPs are now
-covered too.
+Last month my search budget ran out early, so I went quiet for a few
+nights. That's fixed: I now have my own budget, spread evenly across
+the whole month. I'm also covering Tottenville and the 10311/10313
+ZIPs now.
 
-Expect a burst of new listings over the next few nights, then a steady
-5 to 8 new homes a day. Quiet days are normal: Staten Island only adds
-a handful of new listings daily, and Kash keeps re-checking known homes
-for price drops and sold notices, which is when it alerts you."""
+Expect a burst of new listings from me over the next few nights, then
+a steady 5 to 8 new homes a day. Quiet days are normal: Staten Island
+only adds a handful of new listings daily, and I keep re-checking the
+homes I already know for price drops and sold notices — that's when
+I'll alert you."""
 
 
 def main():
@@ -49,7 +51,8 @@ def main():
         sys.exit(1)
 
     store = Store(args.db)
-    outcomes = broadcast(store, apply=args.apply, kind=KIND, message=MESSAGE)
+    outcomes = broadcast(store, apply=args.apply, kind=KIND, message=MESSAGE,
+                         recipients=[KASH_ID])
     if not outcomes:
         print("no allowed chat users in the access table — nothing to send")
         return

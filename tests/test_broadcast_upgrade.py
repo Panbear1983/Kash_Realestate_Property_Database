@@ -102,7 +102,7 @@ def test_a_second_announcement_uses_its_own_ledger_key_and_never_resends_the_fir
                                            kind=second.KIND, message=second.MESSAGE)
     assert outcomes == {ALLOWED_A: "sent", ALLOWED_B: "sent"}
     assert len(push.sent) == first_count + 2
-    assert any("steadier" in text for _, text in push.sent[first_count:])
+    assert any("Hi Kash" in text for _, text in push.sent[first_count:])
     # and re-running either one sends nothing more
     broadcast_upgrade.broadcast(store, apply=True, push=push)
     broadcast_upgrade.broadcast(store, apply=True, push=push,
@@ -110,6 +110,15 @@ def test_a_second_announcement_uses_its_own_ledger_key_and_never_resends_the_fir
     assert len(push.sent) == first_count + 2
     from kash.notifications import split_text
     assert len(split_text(second.MESSAGE)) == 1
+
+
+def test_recipients_override_narrows_but_never_widens_the_allow_list():
+    store = _store()
+    push = FakePush()
+    outcomes = broadcast_upgrade.broadcast(store, apply=True, push=push,
+                                           recipients=[ALLOWED_A, PENDING, 999])
+    assert outcomes == {ALLOWED_A: "sent"}
+    assert [uid for uid, _ in push.sent] == [ALLOWED_A]
 
 
 def test_the_message_fits_telegram_chunking():
