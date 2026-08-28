@@ -177,6 +177,37 @@ help
 
 Contributors can also just send a listing sheet (PDF, Word, or screenshot) to the chat — Kash reads it, previews what it found, and stages it for owner review. Additional `/propose` and `/mine` commands are covered in the contributor guides in `docs/`.
 
+## Hear the answer instead of reading it
+
+Robo Kash can speak. Send `/voice on` and every answer arrives twice — as the normal text
+message, then as a voice message you can play anywhere, including with the phone in your
+pocket. `/voice off` goes back to text only.
+
+```text
+/voice on          turn spoken replies on
+/voice off         text only
+/voice status      what is set right now
+/voice voices      the list of voices to choose from
+/voice set eric    switch voice (first name is enough)
+/voice try ryan    hear a sample without switching
+/voice speed +10   speak 10 percent faster; -50 to +50
+/voice test        hear a sample in the current voice
+```
+
+There are two kinds of voice. The natural ones (Andrew, Christopher, Eric, Ryan and so on)
+sound like a person reading. The robot ones are the classic Mac synthesizers — `Fred` is
+the closest available match to Stephen Hawking's speech machine, and `/voice set hawking`
+is accepted as a name for it. Stephen Hawking's actual voice was a DECtalk unit, which is
+not obtainable on this Mac, so Fred is a near relative rather than the real thing.
+
+The spoken version is a shortened, listenable rendering: code, tables and web addresses are
+left out because they are unbearable to hear, and it stops on a whole sentence rather than
+running for minutes. The text message beside it is always the complete answer, with the
+clickable listing links.
+
+If speech ever fails, the text answer still arrives — the voice message is the only thing
+you lose.
+
 ## What Kash will not do
 
 Kash is read-only. It will not:
