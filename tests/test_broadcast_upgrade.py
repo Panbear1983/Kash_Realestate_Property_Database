@@ -92,6 +92,26 @@ def test_the_dashboards_internal_actor_zero_is_never_a_recipient():
     assert all(uid != 0 for uid, _ in push.sent)
 
 
+def test_a_second_announcement_uses_its_own_ledger_key_and_never_resends_the_first():
+    import broadcast_scrape_pacing as second
+    store = _store()
+    push = FakePush()
+    broadcast_upgrade.broadcast(store, apply=True, push=push)          # first announcement
+    first_count = len(push.sent)
+    outcomes = broadcast_upgrade.broadcast(store, apply=True, push=push,
+                                           kind=second.KIND, message=second.MESSAGE)
+    assert outcomes == {ALLOWED_A: "sent", ALLOWED_B: "sent"}
+    assert len(push.sent) == first_count + 2
+    assert any("steadier" in text for _, text in push.sent[first_count:])
+    # and re-running either one sends nothing more
+    broadcast_upgrade.broadcast(store, apply=True, push=push)
+    broadcast_upgrade.broadcast(store, apply=True, push=push,
+                                kind=second.KIND, message=second.MESSAGE)
+    assert len(push.sent) == first_count + 2
+    from kash.notifications import split_text
+    assert len(split_text(second.MESSAGE)) == 1
+
+
 def test_the_message_fits_telegram_chunking():
     from kash.notifications import split_text
     parts = split_text(broadcast_upgrade.MESSAGE)

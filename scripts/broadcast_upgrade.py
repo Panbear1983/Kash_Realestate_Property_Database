@@ -76,18 +76,20 @@ Just talk to it like a person. If an answer misses, say it a different way.
 Type help anytime."""
 
 
-def broadcast(store, *, apply=False, push=None) -> dict[int, str]:
-    """Send MESSAGE once to every allowed chat user. Returns {user_id: outcome}."""
+def broadcast(store, *, apply=False, push=None, kind=KIND, message=MESSAGE) -> dict[int, str]:
+    """Send `message` once (per `kind` ledger key) to every allowed chat user.
+    Returns {user_id: outcome}. Other one-time announcements reuse this with their own
+    kind + message — see scripts/broadcast_scrape_pacing.py."""
     if push is None:
         push = run_update.push_telegram
     # uid 0 is the dashboard's internal actor row, not a Telegram user — sending to it
     # would fail forever and re-report on every retry. Real Telegram ids are positive.
     recipients = [int(r["telegram_user_id"]) for r in Access(store).all()
                   if r.get("status") == "allowed" and int(r["telegram_user_id"]) > 0]
-    parts = split_text(MESSAGE)
+    parts = split_text(message)
     outcomes: dict[int, str] = {}
     for uid in recipients:
-        if store.notification_sent(uid, KIND):
+        if store.notification_sent(uid, kind):
             outcomes[uid] = "already sent"
             continue
         if not apply:
@@ -102,7 +104,7 @@ def broadcast(store, *, apply=False, push=None) -> dict[int, str]:
         if result == "sent":
             # Marked only on full success: a failed or partial send stays unmarked and is
             # retried by the next --apply.
-            store.mark_notification_sent(uid, KIND)
+            store.mark_notification_sent(uid, kind)
         outcomes[uid] = result
     return outcomes
 
