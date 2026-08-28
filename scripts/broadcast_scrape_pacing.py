@@ -23,30 +23,17 @@ from kash.store import Store
 
 KIND = "broadcast:2026-08-scrape-pacing"
 
-MESSAGE = """Robo Kash update — the nightly listing search just got steadier.
+MESSAGE = """Robo Kash update: the nightly listing search just got steadier.
 
-WHAT HAPPENED
-In August, Kash's search budget ran out around the 20th of the month
-(it was shared with another project), so for a few nights near the end
-of the month Kash couldn't search Zillow at all.
+Last month Kash's search budget ran out early, so it went quiet for a
+few nights. That's fixed: it now has its own budget, spread evenly
+across the whole month. Tottenville and the 10311/10313 ZIPs are now
+covered too.
 
-WHAT CHANGED
-Kash now searches on its own dedicated account and spreads its monthly
-search budget evenly across all 30 days instead of using it up early.
-No more quiet week at the end of the month. Three more Staten Island
-areas are covered too — Tottenville (10307) plus the 10311 and 10313
-ZIP codes.
-
-WHAT TO EXPECT
-For the next few nights you'll see a burst of new listings while Kash
-catches up on the wider search. After that it settles to a steady
-trickle — usually 5 to 8 new homes a day — because that's about how
-many new listings Staten Island actually produces in the target price
-range. A quiet day doesn't mean Kash stopped looking. It means Kash
-already knows every home on the market and is re-checking them for
-price drops and sold notices, which is exactly when it sends an alert.
-
-Nothing changes in how you talk to Kash. Type help anytime."""
+Expect a burst of new listings over the next few nights, then a steady
+5 to 8 new homes a day. Quiet days are normal: Staten Island only adds
+a handful of new listings daily, and Kash keeps re-checking known homes
+for price drops and sold notices, which is when it alerts you."""
 
 
 def main():
