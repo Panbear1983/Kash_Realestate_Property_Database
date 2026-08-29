@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import run_update
 from broadcast_upgrade import DEFAULT_DB, HERE, broadcast
+from kash import voice_link
 from kash.store import Store
 
 KIND = "broadcast:2026-08-voice"
@@ -66,39 +67,21 @@ market — just the way you like it. This is it.
 It lets you play my replies instead of reading through a long list of them,
 handy when you are driving, or when an answer runs to a dozen listings."""
 
-# The renderer lives with the Telegram transport, in the sibling bridge repo. run_bridge.py
-# already reaches the other way (KASH_PATH = ../Kash_Realestate_Property), so the symmetry
-# is deliberate; this stays an optional import so the text announcement works without it.
-BRIDGE_PATH = os.path.join(os.path.dirname(HERE), "Hermes_Telegram_Bridge")
 
+def send_voice_note(chat_id: int, text: str) -> str:
+    """Best-effort voice note. Never raises — the text has already been delivered.
 
-def load_renderer():
-    """Return the bridge's voice module, or None with a printed reason."""
-    if not os.path.isdir(BRIDGE_PATH):
-        print(f"  (no voice: bridge repo not found beside this one)")
-        return None
-    if BRIDGE_PATH not in sys.path:
-        sys.path.insert(0, BRIDGE_PATH)
-    try:
-        from bridge import voice as renderer
-    except Exception as e:  # noqa: BLE001
-        print(f"  (no voice: {e})")
-        return None
-    reason = renderer.unavailable_reason(SPOKEN_VOICE)
-    if reason:
-        print(f"  (no voice: {reason})")
-        return None
-    return renderer
-
-
-def send_voice_note(renderer, chat_id: int, text: str) -> str:
-    """Best-effort voice note. Never raises — the text has already been delivered."""
+    Rendering comes from kash/voice_link.py, the shared optional link to the bridge's
+    speech module. Unlike the daily report, this deliberately ignores per-user voice
+    preferences: it is an announcement, and it has to reach someone who has not
+    switched voice on.
+    """
     import requests
     tok = os.environ.get("KASH_BOT_TOKEN")
     if not tok:
         return "skipped (no KASH_BOT_TOKEN)"
     try:
-        ogg = renderer.render_ogg(renderer.speakable(text, 3000), SPOKEN_VOICE, "+0%")
+        ogg = voice_link.render(text, {"voice": SPOKEN_VOICE, "rate": "+0%", "max_chars": 3000})
         if not ogg:
             return "render failed"
         r = requests.post(f"https://api.telegram.org/bot{tok}/sendVoice",
@@ -147,11 +130,10 @@ def main():
     if not fresh:
         print("  voice note: skipped — no text was sent this run")
         return
-    renderer = load_renderer()
-    if renderer is None:
+    if voice_link.renderer() is None:
         return
     for chat_id in fresh:
-        print(f"  {chat_id} voice note: {send_voice_note(renderer, chat_id, SPOKEN_MESSAGE)}")
+        print(f"  {chat_id} voice note: {send_voice_note(chat_id, SPOKEN_MESSAGE)}")
 
 
 if __name__ == "__main__":

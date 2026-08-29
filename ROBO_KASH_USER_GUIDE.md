@@ -205,6 +205,12 @@ left out because they are unbearable to hear, and it stops on a whole sentence r
 running for minutes. The text message beside it is always the complete answer, with the
 clickable listing links.
 
+Once voice is on, the daily 7am property report speaks too. It arrives as the usual written
+messages, then a short spoken briefing at the end: how much changed overnight, the biggest
+price cut with the address, and the top home on your list. It is deliberately short and
+deliberately not a reading of the written report — a list of addresses and prices read out
+loud is unusable. The written messages remain the full record, with the clickable links.
+
 If speech ever fails, the text answer still arrives — the voice message is the only thing
 you lose.
 

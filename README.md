@@ -136,14 +136,24 @@ RentCast is the preferred licensed source.
    polygons (offline, no API call)
 6. Description signals, then model ranking for new listings
 7. Completeness audit — what is missing, who fills it, and what that blocks
-8. Change digest and optional Telegram delivery
+8. Change digest and optional Telegram delivery — plus, for recipients who switched
+   voice on, one spoken briefing per person after their written messages
 9. Full CSV export, then a health verdict: new problems are pushed, repeats are not,
    and a failed run exits non-zero so the scheduler's status means something
 
 ```bash
 python run_update.py --no-telegram
+python run_update.py --no-voice                  # written report only
 python run_update.py --sources zillow --limit 10
 ```
+
+The spoken briefing (`kash/voice_digest.py`) is written separately from the digest rather
+than read off it: aloud, the digest is bare numbers and internal match keys. Voice is
+opt-in per recipient — settings live with the chat bot, and anyone who has not turned it
+on gets exactly what they got before. Every failure in the audio path is caught and
+reported: the written report has already been delivered by then, and must never be lost
+or re-sent because speech broke. `kash/voice_link.py` is the optional link to the
+renderer, which lives beside `sendVoice` in the sibling Hermes_Telegram_Bridge repo.
 
 On macOS, `scripts/install_scheduler.sh` installs a launchd job that runs the update at
 07:00 each day.

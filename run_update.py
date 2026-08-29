@@ -19,7 +19,7 @@ import sys
 import time
 
 from kash.adapters import REGISTRY
-from kash import health, orchestrator, preferences, schedule
+from kash import health, orchestrator, preferences, schedule, voice_digest
 from kash.access import Access
 from kash.notifications import (
     chunk_digest, format_onboarding, health_recipients, listing_delivery_kind, split_text,
@@ -95,6 +95,49 @@ def push_telegram(text, chat_ids: list[int], request_get=None) -> dict[int, str]
     return outcomes
 
 
+def push_telegram_voice(text, chat_ids: list[int], request_post=None) -> dict[int, str]:
+    """Send `text` as a Telegram voice bubble to each recipient who has voice switched on.
+
+    Sibling of push_telegram, and the only place the daily run sends audio. Three rules
+    make this safe to run unattended at 07:00:
+
+    - Opt-in. A recipient with no stored voice preference is skipped, so nobody starts
+      being spoken to because a default changed.
+    - Best-effort. Every failure is caught and reported as an outcome string; the written
+      report has already been delivered by the time this runs, and losing a voice note
+      must never fail the run or re-trigger a resend.
+    - One per recipient per run. A digest can be many messages; a voice note for each
+      would be a stack of audio at breakfast.
+    """
+    tok = os.environ.get("KASH_BOT_TOKEN")
+    if not tok:
+        return {int(chat_id): "skipped (no KASH_BOT_TOKEN)" for chat_id in chat_ids}
+    if request_post is None:
+        import requests
+        request_post = requests.post
+    from kash import voice_link
+    outcomes = {}
+    for chat_id in chat_ids:
+        chat_id = int(chat_id)
+        prefs = voice_link.prefs_for(chat_id)
+        if not prefs.get("enabled"):
+            outcomes[chat_id] = "skipped (voice off)"
+            continue
+        try:
+            ogg = voice_link.render(text, prefs)
+            if not ogg:
+                outcomes[chat_id] = "render unavailable"
+                continue
+            r = request_post(f"https://api.telegram.org/bot{tok}/sendVoice",
+                             data={"chat_id": chat_id},
+                             files={"voice": ("briefing.ogg", ogg, "audio/ogg")},
+                             timeout=120)
+            outcomes[chat_id] = "sent" if r.json().get("ok") else r.json().get("description", "fail")
+        except Exception as e:  # noqa: BLE001
+            outcomes[chat_id] = f"error: {e}"
+    return outcomes
+
+
 def main():
     ap = argparse.ArgumentParser(description="Kash daily update cycle")
     ap.add_argument("--sources", help="comma list; default = sources with credentials")
@@ -104,6 +147,8 @@ def main():
     ap.add_argument("--limit", type=int, default=None, help="cap results per source")
     ap.add_argument("--force", action="store_true", help="ignore per-source cadence")
     ap.add_argument("--no-telegram", action="store_true")
+    ap.add_argument("--no-voice", action="store_true",
+                    help="send the written report only, even for recipients with voice on")
     args = ap.parse_args()
 
     started = time.time()
@@ -235,6 +280,16 @@ def main():
             outcomes[recipient_id] = (
                 f"sent {sent_any}/{total}" if not failures
                 else f"sent {sent_any}/{total}, failed: {'; '.join(failures[:2])}")
+
+            # The spoken briefing, once, after this recipient's written messages. Built
+            # from the same run rather than read off the digest: spoken aloud, the digest
+            # is bare numbers and match keys. Only where something actually arrived —
+            # narrating a report that failed to send would be worse than silence.
+            if sent_any and not args.no_voice:
+                spoken = voice_digest.spoken_briefing(result["events"], actionable)
+                if spoken:
+                    outcome = push_telegram_voice(spoken, [recipient_id])[recipient_id]
+                    outcomes[recipient_id] += f", voice: {outcome}"
         if outcomes:
             print(f"\n[telegram] {outcomes}")
         elif recipients:
