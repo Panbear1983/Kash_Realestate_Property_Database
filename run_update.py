@@ -101,8 +101,10 @@ def push_telegram_voice(text, chat_ids: list[int], request_post=None) -> dict[in
     Sibling of push_telegram, and the only place the daily run sends audio. Three rules
     make this safe to run unattended at 07:00:
 
-    - Opt-in. A recipient with no stored voice preference is skipped, so nobody starts
-      being spoken to because a default changed.
+    - On by default, but `/voice off` still wins. The morning report always carries a
+      spoken briefing, so a recipient does not have to discover a setting to get one;
+      anyone who explicitly turned voice off keeps it off, because a stored preference
+      overrides the default.
     - Best-effort. Every failure is caught and reported as an outcome string; the written
       report has already been delivered by the time this runs, and losing a voice note
       must never fail the run or re-trigger a resend.
@@ -119,7 +121,7 @@ def push_telegram_voice(text, chat_ids: list[int], request_post=None) -> dict[in
     outcomes = {}
     for chat_id in chat_ids:
         chat_id = int(chat_id)
-        prefs = voice_link.prefs_for(chat_id)
+        prefs = voice_link.prefs_for(chat_id, default_enabled=True)
         if not prefs.get("enabled"):
             outcomes[chat_id] = "skipped (voice off)"
             continue

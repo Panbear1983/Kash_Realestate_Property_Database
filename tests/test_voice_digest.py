@@ -145,27 +145,68 @@ class FakePost:
         return type("R", (), {"json": staticmethod(lambda: payload)})()
 
 
-def _with_prefs(monkey: dict):
-    """Stand in for the bridge: control who has voice on without touching the real file."""
+class FakeBridge:
+    """Stands in for the bridge's voice module, reproducing the one behaviour that
+    matters here: a stored preference overrides the caller's default."""
+
+    def __init__(self, stored: dict):
+        self.stored = {int(k): v for k, v in stored.items()}
+        self.rendered = []
+
+    def get_prefs(self, bot_name, user_id, defaults):
+        return {**defaults, **self.stored.get(int(user_id), {})}
+
+    def unavailable_reason(self, voice=None):
+        return None
+
+    def speakable(self, text, max_chars):
+        return text[:max_chars]
+
+    def render_ogg(self, text, voice, rate):
+        self.rendered.append((text, voice, rate))
+        return b"OGG"
+
+
+def _with_bridge(stored: dict):
     from kash import voice_link
-    voice_link.prefs_for = lambda uid: monkey.get(int(uid), {"enabled": False})
-    voice_link.render = lambda text, prefs: b"OGG"
-    return voice_link
+    bridge = FakeBridge(stored)
+    voice_link._cached = [bridge]
+    return bridge
 
 
 ON = {"enabled": True, "voice": "Fred", "rate": "+0%", "max_chars": 2000}
+OFF = {"enabled": False}
 
 
-def test_a_recipient_who_never_switched_voice_on_is_not_spoken_to():
-    _with_prefs({})
+def test_the_daily_report_speaks_by_default():
+    """The owner's rule: the morning push always carries a briefing, so a recipient does
+    not have to find a setting to get one."""
+    bridge = _with_bridge({})
     os.environ["KASH_BOT_TOKEN"] = "test-token"
     post = FakePost()
-    assert run_update.push_telegram_voice("hello", [11], request_post=post) == {11: "skipped (voice off)"}
-    assert post.calls == [], "no audio may be sent to someone who did not ask for it"
+    assert run_update.push_telegram_voice("hello", [11], request_post=post) == {11: "sent"}
+    assert len(post.calls) == 1 and bridge.rendered[0][1] == "en-US-AndrewNeural"
 
 
-def test_only_the_opted_in_recipient_of_a_mixed_pair_gets_audio():
-    _with_prefs({11: ON})
+def test_an_explicit_voice_off_still_wins_over_that_default():
+    """"Always" must mean "unless this person asked me to stop", never "regardless"."""
+    _with_bridge({11: OFF})
+    os.environ["KASH_BOT_TOKEN"] = "test-token"
+    post = FakePost()
+    assert run_update.push_telegram_voice("hello", [11], request_post=post) == {
+        11: "skipped (voice off)"}
+    assert post.calls == [], "someone who turned voice off is never spoken to"
+
+
+def test_each_recipients_own_voice_choice_is_used():
+    bridge = _with_bridge({11: ON})
+    os.environ["KASH_BOT_TOKEN"] = "test-token"
+    run_update.push_telegram_voice("hello", [11], request_post=FakePost())
+    assert bridge.rendered[0][1] == "Fred"
+
+
+def test_one_recipient_opting_out_does_not_silence_the_other():
+    _with_bridge({22: OFF})
     os.environ["KASH_BOT_TOKEN"] = "test-token"
     post = FakePost()
     out = run_update.push_telegram_voice("hello", [11, 22], request_post=post)
@@ -175,15 +216,14 @@ def test_only_the_opted_in_recipient_of_a_mixed_pair_gets_audio():
 
 def test_a_telegram_rejection_is_reported_not_raised():
     """The written report has already been delivered; audio must not fail the run."""
-    _with_prefs({11: ON})
+    _with_bridge({11: ON})
     os.environ["KASH_BOT_TOKEN"] = "test-token"
     assert run_update.push_telegram_voice("hello", [11], request_post=FakePost(ok=False)) == {
         11: "Bad Request"}
 
 
 def test_a_render_failure_is_reported_not_raised():
-    voice_link = _with_prefs({11: ON})
-    voice_link.render = lambda text, prefs: None
+    _with_bridge({11: ON}).render_ogg = lambda text, voice, rate: None
     os.environ["KASH_BOT_TOKEN"] = "test-token"
     post = FakePost()
     assert run_update.push_telegram_voice("hello", [11], request_post=post) == {
@@ -192,19 +232,17 @@ def test_a_render_failure_is_reported_not_raised():
 
 
 def test_an_exception_anywhere_in_the_audio_path_is_contained():
-    voice_link = _with_prefs({11: ON})
-
-    def boom(text, prefs):
+    def boom(text, voice, rate):
         raise RuntimeError("edge-tts 503")
 
-    voice_link.render = boom
+    _with_bridge({11: ON}).render_ogg = boom
     os.environ["KASH_BOT_TOKEN"] = "test-token"
     out = run_update.push_telegram_voice("hello", [11], request_post=FakePost())
     assert out[11].startswith("error: "), "the failure is reported, and the run continues"
 
 
 def test_without_a_bot_token_nothing_is_attempted():
-    _with_prefs({11: ON})
+    _with_bridge({11: ON})
     os.environ.pop("KASH_BOT_TOKEN", None)
     post = FakePost()
     assert run_update.push_telegram_voice("hello", [11], request_post=post) == {

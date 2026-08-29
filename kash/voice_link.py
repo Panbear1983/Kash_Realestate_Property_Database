@@ -24,9 +24,21 @@ BRIDGE_PATH = os.environ.get(
 # daily job has to name the same bot the chat runs on to read the same settings.
 BOT_NAME = "Kash_Realestate_Property_bot"
 
-# Voice is opt-in: a recipient with no stored preference gets a written report only,
-# exactly as before this existed. Nobody is spoken to because a default said so.
-_OFF = {"enabled": False, "voice": "en-US-AndrewNeural", "rate": "+0%", "max_chars": 2000}
+# Everything except the on/off switch, which each caller decides the default for.
+_BASE = {"voice": "en-US-AndrewNeural", "rate": "+0%", "max_chars": 2000}
+
+# Two callers, two defaults, deliberately:
+#
+#   Chat replies default OFF. Speaking every answer is a running change to how the bot
+#   behaves, so a person turns that on for themselves with /voice on.
+#
+#   The daily report defaults ON. It is one short briefing a day attached to a push the
+#   recipient already receives, and the owner's instruction is that the morning report
+#   always carries it.
+#
+# In both cases an explicit `/voice off` still wins: a stored preference overrides the
+# default, so "always" means "unless this person asked me to stop", never "regardless".
+_OFF = {"enabled": False, **_BASE}
 
 _cached: list = []          # [] = not tried yet, [None] = tried and unavailable
 
@@ -54,19 +66,24 @@ def renderer(quiet: bool = False):
     return module
 
 
-def prefs_for(user_id: int) -> dict:
-    """One recipient's voice settings, or the off-by-default set."""
+def prefs_for(user_id: int, *, default_enabled: bool = False) -> dict:
+    """One recipient's voice settings, falling back to `default_enabled` if they have none.
+
+    A stored preference always wins over the default, which is what keeps `/voice off`
+    meaningful even where voice is on by default.
+    """
+    defaults = {"enabled": bool(default_enabled), **_BASE}
     module = renderer(quiet=True)
     if module is None:
-        return dict(_OFF)
+        return dict(_OFF)          # nothing can be rendered anyway
     try:
-        return module.get_prefs(BOT_NAME, int(user_id), dict(_OFF))
+        return module.get_prefs(BOT_NAME, int(user_id), defaults)
     except Exception:  # noqa: BLE001
         return dict(_OFF)
 
 
-def wants_voice(user_id: int) -> bool:
-    return bool(prefs_for(user_id).get("enabled"))
+def wants_voice(user_id: int, *, default_enabled: bool = False) -> bool:
+    return bool(prefs_for(user_id, default_enabled=default_enabled).get("enabled"))
 
 
 def render(text: str, prefs: dict) -> bytes | None:
