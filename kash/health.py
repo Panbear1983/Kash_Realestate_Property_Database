@@ -45,6 +45,29 @@ def assess(result: dict, due_sources: list[str] | None = None) -> dict:
     fetched = sum(int(s.get("fetched") or 0) for s in summaries if not s.get("error"))
     if summaries and fetched == 0 and not errored:
         problems.append("all sources returned zero listings")
+    else:
+        # Per-source outcomes. On 2026-09-02 the Zillow actor changed its output shape and
+        # four nights of "fetched 20, +0 new" followed — every row rejected for lack of an
+        # address — while the run-wide total above stayed non-zero and nothing complained.
+        # A source that fetches results and keeps none of them is not healthy, and neither
+        # is one that returns nothing while the others work.
+        for s in summaries:
+            if s.get("error"):
+                continue
+            name = s.get("source")
+            got = int(s.get("fetched") or 0)
+            rejected = int(s.get("rejected") or 0)
+            off_scope = int(s.get("out_of_scope") or 0)
+            if got == 0:
+                problems.append(f"source {name} returned zero listings")
+            elif rejected >= got:
+                problems.append(f"source {name}: all {got} results rejected "
+                                "(provider output format may have changed)")
+            elif rejected > got / 2:
+                problems.append(f"source {name}: {rejected} of {got} results rejected")
+            elif off_scope >= got:
+                problems.append(f"source {name}: all {got} results out of scope "
+                                "(search area or filters may be wrong)")
 
     # An enrichment stage that fails on most of what it touched is not a healthy run, even
     # though each individual failure is caught and counted.

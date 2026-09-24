@@ -225,8 +225,11 @@ def main():
         if "error" in s:
             print(f"  [{s['source']}] SKIPPED: {s['error'][:100]}")
         else:
+            # Every bucket, including the two that used to be invisible: a night where all
+            # 20 fetched rows were rejected read as "+0 new ~0 updated (0 off-scope)".
             print(f"  [{s['source']}] fetched {s['fetched']}  +{s['inserted']} new  "
-                  f"~{s['updated']} updated  ({s['out_of_scope']} off-scope)")
+                  f"~{s['updated']} updated  ={s.get('unchanged', 0)} unchanged  "
+                  f"({s['out_of_scope']} off-scope, {s.get('rejected', 0)} rejected)")
     from kash import lifecycle, schools, urlfill
     print(f"  {lifecycle.format_stats(result.get('lifecycle') or {})}")
     print(f"  {urlfill.format_stats(result.get('urlfill') or {})}")

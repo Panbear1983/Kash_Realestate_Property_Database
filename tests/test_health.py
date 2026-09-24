@@ -313,6 +313,57 @@ def test_alert_memory_survives_the_state_file_round_trip():
                               today="2026-08-02") is None
 
 
+
+# --- per-source outcomes (the 2026-09-02 Zillow format change) ----------------------------
+
+def _rejected(fetched, rejected, **over):
+    return {"source": "zillow", "fetched": fetched, "inserted": 0, "updated": 0,
+            "unchanged": 0, "out_of_scope": 0, "rejected": rejected, **over}
+
+
+def test_a_source_whose_results_are_all_rejected_is_degraded():
+    """2026-09-02: the Zillow actor changed its output shape. Four nights of 'fetched 20,
+    +0 new' followed, every row rejected for lack of an address, and nothing complained
+    because the run-wide fetched total was not zero."""
+    r = result(summaries=[_rejected(20, 20),
+                          {"source": "rentcast", "fetched": 463, "inserted": 6}])
+    h = health.assess(r)
+    assert h["verdict"] == health.DEGRADED
+    assert any("zillow" in p and "all 20 results rejected" in p for p in h["problems"]), h
+
+
+def test_a_mostly_rejected_source_is_degraded():
+    h = health.assess(result(summaries=[_rejected(20, 15, inserted=5)]))
+    assert h["verdict"] == health.DEGRADED
+    assert any("15 of 20 results rejected" in p for p in h["problems"]), h
+
+
+def test_a_few_rejections_are_tolerated():
+    assert health.assess(result(summaries=[_rejected(20, 2, inserted=18)]))["verdict"] == health.OK
+
+
+def test_one_source_returning_nothing_while_another_works_is_degraded():
+    """Only the run-wide total used to be checked, so a dead Zillow query hid behind a
+    healthy RentCast census."""
+    r = result(summaries=[{"source": "zillow", "fetched": 0},
+                          {"source": "rentcast", "fetched": 463, "inserted": 3}])
+    h = health.assess(r)
+    assert h["verdict"] == health.DEGRADED
+    assert any("zillow returned zero listings" in p for p in h["problems"]), h
+
+
+def test_all_results_out_of_scope_is_degraded():
+    h = health.assess(result(summaries=[_rejected(20, 0, out_of_scope=20)]))
+    assert h["verdict"] == health.DEGRADED
+    assert any("all 20 results out of scope" in p for p in h["problems"]), h
+
+
+def test_a_rejected_source_alert_is_the_same_problem_night_after_night():
+    a = "source zillow: all 20 results rejected (provider output format may have changed)"
+    b = "source zillow: all 19 results rejected (provider output format may have changed)"
+    assert health.signature(a) == health.signature(b)
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

@@ -26,6 +26,11 @@ _DROP = re.compile(r"^\s*(?P<old>\d[\d,]*)\s*->\s*(?P<new>\d[\d,]*)")
 _ADDR_KEY = re.compile(r"^addr:([^|]+)")
 _GONE_MARKERS = ("-> pending", "-> off_market", "-> sold")
 
+# The voice that reads the report has a name, and introduces itself by it. Chosen by
+# the owner on 2026-09-10 (en-US-AvaMultilingualNeural, see kash/voice_link.py); the
+# name here and the default voice there change together.
+ASSISTANT_NAME = "Ava"
+
 # Spoken out, "st" is heard as "Saint" and "Rd" is often spelled letter by letter.
 _STREET_WORDS = {
     "ave": "Avenue", "av": "Avenue", "st": "Street", "str": "Street", "rd": "Road",
@@ -158,6 +163,7 @@ def spoken_briefing(events, listings=None, *, today: date | None = None) -> str:
     if not body:
         return ""
     weekday = (today or date.today()).strftime("%A")
-    opening = f"Good morning. Robo Kash here with your Staten Island update for {weekday}."
+    opening = (f"Good morning. This is {ASSISTANT_NAME}, Robo Kash's assistant, with your "
+               f"Staten Island update for {weekday}.")
     closing = "The full list, with the links, is in the message above."
     return " ".join([opening, *body, closing])

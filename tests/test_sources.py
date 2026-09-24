@@ -225,10 +225,152 @@ def test_a_doz_filtered_run_is_never_conclusive():
     assert ad2.coverage(len(rows2))["truncated"] is False
 
 
+
+# --- actor output formats ---------------------------------------------------------------
+# The Sep-2026 shape, as returned by the 2026-09-04T23:00Z run (one real item, trimmed).
+NEW_FORMAT_ITEM = {
+    "zpid": "32287352",
+    "listingAddress": {"street": "34 Holsman Rd", "unit": None, "city": "Staten Island",
+                       "state": "NY", "zipCode": "10301",
+                       "full": "34 Holsman Rd, Staten Island, NY 10301"},
+    "listingPrice": {"amount": 899999, "currency": "USD", "formatted": "$899,999"},
+    "bedrooms": 3, "bathrooms": 2, "livingArea": 1938, "livingAreaUnit": "sqft",
+    "homeType": "SINGLE_FAMILY", "listingStatus": "forSale",
+    "listingType": {"isFSBA": False, "isFSBO": False, "isComingSoon": True},
+    "propertyUrl": "https://www.zillow.com/homedetails/34-Holsman-Rd-Staten-Island-NY-10301/32287352_zpid/",
+    "coordinates": {"latitude": 40.611588, "longitude": -74.092766},
+    "daysOnZillow": 0, "zestimate": 943100, "rentZestimate": 3761,
+    "broker": {"name": "Martino Realty Group", "phoneNumber": None},
+    "mainImage": "https://photos.zillowstatic.com/fp/abc-p_e.jpg", "photoCount": 24,
+}
+
+# The legacy card shape the adapter was written against (pre 2026-09-02).
+LEGACY_FORMAT_ITEM = {
+    "addressStreet": "44 Impala Ct", "addressZipcode": "10305", "unformattedPrice": 725000,
+    "beds": 3, "baths": 3, "area": 1176, "homeType": "TOWNHOUSE", "statusType": "FOR_SALE",
+    "detailUrl": "/homedetails/44-Impala-Ct-Staten-Island-NY-10305/62723635_zpid/",
+    "latLong": {"latitude": 40.603485, "longitude": -74.070114},
+    "imgSrc": "https://photos.zillowstatic.com/fp/def-p_e.jpg",
+    "brokerName": "Listing by: Red Door Realty Group", "zestimate": 719900,
+    "rentZestimate": 3028, "variableData": {"text": "3 days on Zillow"},
+    "hdpData": {"homeInfo": {"zpid": 62723635, "yearBuilt": 1998}},
+}
+
+
+def _normalized(item):
+    from kash.adapters.zillow_scraper import ZillowScraperAdapter
+    return ZillowScraperAdapter(config={})._normalize(item)
+
+
+def test_normalize_reads_the_september_2026_actor_format():
+    """2026-09-02: the actor moved every field the adapter read under new names. Reading
+    only the legacy names produced address-less rows that the store rejected, four nights
+    running, while the log said '+0 new'."""
+    rec = _normalized(NEW_FORMAT_ITEM)
+    assert rec["street_address"] == "34 Holsman Rd"
+    assert rec["zip"] == "10301"
+    assert rec["list_price"] == 899999
+    assert rec["beds"] == "3" and rec["baths"] == "2"
+    assert rec["sqft"] == 1938
+    assert rec["property_type"] == "sf_detached"
+    assert rec["status"] == "active"
+    assert rec["listing_url"].endswith("/32287352_zpid/")
+    assert rec["source_url"] == rec["listing_url"]
+    assert rec["latitude"] == 40.611588 and rec["longitude"] == -74.092766
+    assert rec["days_on_market"] == 0
+    assert rec["listing_brokerage"] == "Martino Realty Group"
+    assert rec["primary_photo_url"].startswith("https://photos.zillowstatic.com/")
+    assert rec["photo_count"] == 24
+    assert rec["zestimate"] == 943100 and rec["estimated_rent_monthly"] == 3761
+
+
+def test_normalize_still_reads_the_legacy_card_format():
+    rec = _normalized(LEGACY_FORMAT_ITEM)
+    assert rec["street_address"] == "44 Impala Ct" and rec["zip"] == "10305"
+    assert rec["list_price"] == 725000
+    assert rec["beds"] == "3" and rec["baths"] == "3" and rec["sqft"] == 1176
+    assert rec["property_type"] == "sf_attached" and rec["status"] == "active"
+    assert rec["listing_url"].startswith("https://www.zillow.com/homedetails/")
+    assert rec["latitude"] == 40.603485
+    assert rec["days_on_market"] == 3
+    assert rec["year_built"] == 1998
+    assert rec["listing_brokerage"] == "Listing by: Red Door Realty Group"
+
+
+def test_a_transitional_item_reads_the_same_from_either_shape():
+    """The 2026-09-01 run carried both shapes on every item."""
+    both = {**LEGACY_FORMAT_ITEM, **NEW_FORMAT_ITEM}
+    assert _normalized(both)["street_address"] == "34 Holsman Rd"
+    assert _normalized(both)["list_price"] == 899999
+
+
+def test_new_format_statuses_map_onto_pool_statuses():
+    def status_of(value):
+        return _normalized({**NEW_FORMAT_ITEM, "listingStatus": value})["status"]
+    assert status_of("forSale") == "active"
+    assert status_of("comingSoon") == "active"
+    assert status_of("FOR_SALE") == "active"
+    assert status_of("pending") == "pending"
+    assert status_of("underContract") == "pending"
+    assert status_of("sold") == "sold"
+    assert status_of("recentlySold") == "sold"
+    assert status_of("offMarket") == "off_market"
+    assert status_of("somethingNew") == "active", "unknown statuses default to active, as before"
+
+
+def test_new_format_rows_have_an_identity_the_store_accepts():
+    """The failure mode was not a validation error — Listing accepts an all-None row — but
+    a missing dedup key, which store.upsert reports as 'rejected'."""
+    from kash.dedup import match_key
+    from kash.schema import Listing
+    rec = Listing(**_normalized(NEW_FORMAT_ITEM)).model_dump()
+    assert match_key(rec) == "addr:34 holsman rd|10301"
+
+
+def test_a_replay_dataset_reads_the_stored_run_instead_of_buying_one():
+    import os
+    from kash.adapters import zillow_scraper as zs
+
+    calls = {}
+
+    class R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return [dict(NEW_FORMAT_ITEM)]
+
+    def fake_get(url, params=None, timeout=None):
+        calls["get"] = (url, params)
+        return R()
+
+    def fake_post(*a, **k):
+        raise AssertionError("a replay must not start an actor run")
+
+    old_get, old_post, old_token = zs.requests.get, zs.requests.post, os.environ.get("APIFY_TOKEN")
+    zs.requests.get, zs.requests.post = fake_get, fake_post
+    os.environ["APIFY_TOKEN"] = "test-token"
+    try:
+        ad = zs.ZillowScraperAdapter(config={"results_limit": 40, "max_days_on_market": 7,
+                                             "replay_dataset": "abc123"})
+        rows = ad.fetch({"market": "Staten Island, NY", "price": dict(FULL_RANGE)})
+    finally:
+        zs.requests.get, zs.requests.post = old_get, old_post
+        if old_token is None:
+            os.environ.pop("APIFY_TOKEN", None)
+        else:
+            os.environ["APIFY_TOKEN"] = old_token
+    assert "/datasets/abc123/items" in calls["get"][0]
+    assert calls["get"][1]["token"] == "test-token"
+    assert rows[0]["street_address"] == "34 Holsman Rd" and rows[0]["source"] == "zillow"
+    cov = ad.coverage(len(rows))
+    assert cov["replay_dataset"] == "abc123" and cov["truncated"] is True
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]
     for fn in tests:
         fn()
         print(f"  ok  {fn.__name__}")
-    print(f"{len(tests)} passed — source config, Zillow query shape, run coverage")
+    print(f"{len(tests)} passed — source config, Zillow query shape, actor formats, run coverage")

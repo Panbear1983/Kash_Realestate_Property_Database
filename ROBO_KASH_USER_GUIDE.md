@@ -194,8 +194,9 @@ pocket. `/voice off` goes back to text only.
 /voice test        hear a sample in the current voice
 ```
 
-There are two kinds of voice. The natural ones (Andrew, Christopher, Eric, Ryan and so on)
-sound like a person reading. The robot ones are the classic Mac synthesizers — `Fred` is
+There are two kinds of voice. The natural ones (Ava, Emma, Jenny, Andrew, Christopher and so
+on) sound like a person reading. Ava is the default: she introduces herself as Robo Kash's
+assistant and reads the morning report. The robot ones are the classic Mac synthesizers — `Fred` is
 the closest available match to Stephen Hawking's speech machine, and `/voice set hawking`
 is accepted as a name for it. Stephen Hawking's actual voice was a DECtalk unit, which is
 not obtainable on this Mac, so Fred is a near relative rather than the real thing.

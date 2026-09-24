@@ -25,7 +25,9 @@ BRIDGE_PATH = os.environ.get(
 BOT_NAME = "Kash_Realestate_Property_bot"
 
 # Everything except the on/off switch, which each caller decides the default for.
-_BASE = {"voice": "en-US-AndrewNeural", "rate": "+0%", "max_chars": 2000}
+# Ava: the owner's pick (2026-09-10) after the classic robot voice wore out its welcome.
+# She is introduced by name in the morning briefing (kash/voice_digest.py).
+_BASE = {"voice": "en-US-AvaMultilingualNeural", "rate": "+0%", "max_chars": 2000}
 
 # Two callers, two defaults, deliberately:
 #

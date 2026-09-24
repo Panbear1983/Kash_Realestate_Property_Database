@@ -100,7 +100,8 @@ def test_the_briefing_names_the_deepest_cut_not_the_first_one():
 
 def test_the_briefing_opens_with_the_day_and_closes_by_pointing_at_the_text():
     spoken = voice_digest.spoken_briefing(_events(), today=TUESDAY)
-    assert spoken.startswith("Good morning. Robo Kash here with your Staten Island update for Tuesday.")
+    assert spoken.startswith("Good morning. This is Ava, Robo Kash's assistant, with your "
+                             "Staten Island update for Tuesday.")
     assert spoken.endswith("The full list, with the links, is in the message above.")
 
 
@@ -185,7 +186,7 @@ def test_the_daily_report_speaks_by_default():
     os.environ["KASH_BOT_TOKEN"] = "test-token"
     post = FakePost()
     assert run_update.push_telegram_voice("hello", [11], request_post=post) == {11: "sent"}
-    assert len(post.calls) == 1 and bridge.rendered[0][1] == "en-US-AndrewNeural"
+    assert len(post.calls) == 1 and bridge.rendered[0][1] == "en-US-AvaMultilingualNeural"
 
 
 def test_an_explicit_voice_off_still_wins_over_that_default():
